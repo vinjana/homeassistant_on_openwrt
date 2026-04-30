@@ -97,6 +97,65 @@ external disk is absent (HA will not start, but routing and networking are unaff
 Now proceed with the normal installation below.
 
 
+## Feature support
+
+### Core platform
+
+All standard HA platform features are available:
+automations, scripts, scenes, schedules, blueprints, templates, groups, helpers
+(input booleans, numbers, selects, text, counters, timers, date/time),
+todo lists, shopping list, person tracking, zones, tags, alerts, webhooks,
+Python scripts, dashboard (Lovelace), history, logbook, energy dashboard, and backup.
+
+The recorder uses SQLite. The default configuration stores the database in `/tmp` (RAM, cleared on reboot).
+Set `db_url` in the `recorder:` block to a persistent path if you need history to survive reboots.
+
+### Integrations
+
+| Integration | Status | Notes |
+|---|---|---|
+| MQTT | ✓ | |
+| ESPHome | ✓ | LAN-based; Bluetooth pairing not available |
+| ZHA (Zigbee) | ✓ on Lumi/GTW360 only | Lumi Gateway uses zigpy-zigate; GTW360 uses zigpy-zboss; not available on other hardware |
+| Xiaomi (xiaomi_miio, xiaomi_aqara) | ✓ | |
+| Yeelight | ✓ | |
+| Met.no weather | ✓ | |
+| Google Translate TTS | ✓ | Audio delivery requires a media player entity |
+| Telegram / Telegram Bot | ✓ | |
+| REST & command_line | ✓ | |
+| Template sensors/triggers | ✓ | |
+| SNMP | ✓ | |
+| Wake-on-LAN | ✓ | |
+| MPD (music player) | ✓ | |
+| Radio Browser | ✓ | |
+| UPnP | ✓ | |
+| Camera (still images) | ✓ | Live video streams not available (see below) |
+| Brother printers | ✓ | |
+| Conversation (text assistant) | ✓ | Text-based only; voice pipeline not available |
+| Alexa (local API) | ✓ | |
+| Google Assistant (local API) | ✓ | |
+
+### Bundled extras
+
+The install script also installs and enables the following tools, which are not part of HA core:
+
+| Tool | Port | Notes |
+|---|---|---|
+| [hass-configurator](https://github.com/danielperna84/hass-configurator) | 3218 | Web-based config file editor; verified working |
+
+### Not supported
+
+| Feature | Reason |
+|---|---|
+| Bluetooth | No BLE stack on OpenWrt; all Bluetooth integrations are unavailable |
+| Live video / camera streams | The `stream` component requires `ffmpeg`, which is not installed |
+| Z-Wave | Component not included |
+| Matter / Thread | Component not included |
+| Nabu Casa cloud | Component installed but excluded from auto-load; enabling it is untested |
+| Mobile App companion | Disabled |
+| Voice pipeline (STT / wake word) | No suitable speech-to-text or wake-word hardware support on OpenWrt |
+| Supervisor / add-ons | Requires HA OS or HA Supervised; not available on OpenWrt regardless of container runtime |
+
 ## ZHA usage on Xiaomi Gateway
 
 The component uses internal UART to communicate with ZigBee chip.
