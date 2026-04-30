@@ -23,20 +23,42 @@ Testing is staged from cheapest to closest-to-reality:
 
 == Prerequisites
 
-.Host packages required
+=== Host packages (Ubuntu)
+
+.Stage 1 only — x86_64 QEMU (KVM)
 [source,bash]
 ----
-sudo apt install qemu-system-x86 qemu-system-arm qemu-utils openssh-client wget
+sudo apt-get install \
+    qemu-system-x86 \   # qemu-system-x86_64 binary
+    qemu-utils \        # qemu-img (image resize)
+    parted \            # partition table manipulation (no root needed on image files)
+    e2fsprogs \         # e2fsck, resize2fs, dumpe2fs, debugfs
+    openssh-client \    # ssh, scp
+    wget                # image download
 ----
 
-KVM access (required for Stage 1 acceleration):
+.Stage 2 additionally — aarch64 QEMU (TCG software emulation)
 [source,bash]
 ----
-# verify KVM is available
-ls -la /dev/kvm
-# if permission denied, add your user to the kvm group:
-sudo usermod -aG kvm $USER   # then log out and back in
+sudo apt-get install \
+    qemu-system-arm \   # qemu-system-aarch64 binary
+    qemu-efi-aarch64    # UEFI firmware (QEMU_EFI.fd) required to boot the armsr/armv8 image
 ----
+
+NOTE: `python3` (used by `qemu-img info` output parsing in `vm-setup.sh`) is assumed to be already present on any modern LINUX system.
+
+=== KVM access (required for Stage 1 acceleration)
+
+x86_64 runs with KVM hardware virtualisation, which requires your user to be in the `kvm` group:
+
+[source,bash]
+----
+ls -la /dev/kvm                     # verify KVM device is present
+sudo usermod -aG kvm $USER          # add yourself to the kvm group
+# log out and back in (or: newgrp kvm in the current shell)
+----
+
+aarch64 uses TCG software emulation and does not require KVM.
 
 == Stage 1: x86_64 QEMU VM
 
@@ -44,7 +66,7 @@ sudo usermod -aG kvm $USER   # then log out and back in
 
 [source,bash]
 ----
-cd upgrade/
+cd tests/
 ./vm-setup.sh
 ----
 
@@ -100,7 +122,7 @@ delete the image and re-run setup:
 [source,bash]
 ----
 ./vm-stop.sh
-rm upgrade/openwrt-25.12.3-x86-64-generic-ext4-combined.img
+rm tests/openwrt-25.12.3-x86-64-generic-ext4-combined.img
 ./vm-setup.sh
 ----
 
@@ -127,26 +149,42 @@ Exit code 0 = all checks pass.
 Once Stage 1 is clean, repeat on the aarch64 target to catch architecture-specific issues
 (binary wheel availability for `aarch64-musllinux`, etc.).
 
-NOTE: There is currently no `aarch64-vm-setup.sh`. This stage is manual until Stage 1 is stable.
+All scripts accept an `[arch]` argument; pass `aarch64` throughout.
+The aarch64 VM uses host port **2223** (so both VMs can run simultaneously if needed).
+
+=== One-time setup
 
 [source,bash]
 ----
-wget https://downloads.openwrt.org/releases/25.12.3/targets/armsr/armv8/openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img.gz
-gunzip openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img.gz
-qemu-img resize -f raw openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img 2G
-# partition resize + network patch: same steps as vm-setup.sh, adapted for armv8
-
-qemu-system-aarch64 \
-  -M virt -cpu cortex-a57 \
-  -m 1024 -smp 2 \
-  -drive file=openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img,if=virtio,format=raw \
-  -nic user,model=virtio,hostfwd=tcp::2223-:22 \
-  -nographic
-
-ssh -o StrictHostKeyChecking=no root@localhost -p 2223 'bash -s' < ../ha_install.sh
+sudo apt-get install qemu-system-arm qemu-efi-aarch64
+cd tests/
+./vm-setup.sh aarch64
 ----
 
-Run `vm-qualify.sh` with `SSH_PORT=2223` (edit or pass as env var) for the same checks.
+=== Running the VM
+
+[source,bash]
+----
+./vm-start.sh aarch64     # boots VM, waits for SSH on port 2223
+./vm-stop.sh aarch64      # shuts down the VM
+----
+
+aarch64 uses TCG software emulation (no KVM), so boot and install are significantly slower
+than Stage 1. Allow 10–20 minutes for `ha_install.sh` to complete.
+
+=== Installing Home Assistant
+
+[source,bash]
+----
+./vm-run.sh aarch64
+----
+
+=== Operational qualification
+
+[source,bash]
+----
+./vm-qualify.sh aarch64
+----
 
 == Stage 3: OpenWrt One (physical hardware)
 
@@ -154,17 +192,11 @@ The OpenWrt One already runs OpenWrt 25.12.3 (r32912-6639b15f62) — no firmware
 
 [source,bash]
 ----
-ssh root@<router-ip> 'bash -s' < ../ha_install.sh
+ssh root@<router-ip> 'sh -s' < ../ha_install.sh
 ----
 
-Qualification:
-[source,bash]
-----
-SSH_PORT=22 SSH_HOST=<router-ip> ./vm-qualify.sh
-----
-
-NOTE: `vm-qualify.sh` currently hardcodes `localhost:2222`. Once Stage 2 is stable,
-the script will be parameterised for SSH host and port.
+NOTE: OpenWrt only provides `ash`; `bash` is not available on the device.
+Use `sh -s` (POSIX sh, satisfied by ash), not `bash -s`.
 
 == Iteration workflow
 
@@ -173,11 +205,20 @@ The recommended workflow for fixing issues in `ha_install.sh`:
 [source,bash]
 ----
 # 1. edit ha_install.sh on the host
-# 2. reset the VM to a clean state
-./vm-stop.sh && ./vm-start.sh
+# 2. reset the VM to a clean state  (replace x86_64 with aarch64 as needed)
+./vm-stop.sh x86_64 && ./vm-start.sh x86_64
 # 3. run the install
-./vm-run.sh
+./vm-run.sh x86_64
 # 4. if it completes, run qualification
-./vm-qualify.sh
+./vm-qualify.sh x86_64
 # 5. repeat from 1 until all checks pass
+----
+
+To get a truly fresh image after a failed partial install:
+[source,bash]
+----
+./vm-stop.sh x86_64
+rm tests/openwrt-25.12.3-x86-64-generic-ext4-combined.img
+./vm-setup.sh x86_64    # re-downloads and re-patches
+./vm-start.sh x86_64
 ----

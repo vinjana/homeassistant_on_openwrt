@@ -8,7 +8,8 @@ get_ha_version()
 
 get_python_version()
 {
-  opkg list | grep python3-base | head -n 1 | grep -Eo '[[:digit:]]+\.[[:digit:]]+'
+  # apk list output: "python3-base-3.13.9-r3 x86_64 ..." — extract major.minor
+  apk list python3-base 2>/dev/null | head -1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 | grep -Eo '^[0-9]+\.[0-9]+'
 }
 
 get_version()
@@ -39,7 +40,7 @@ int_version() {
 
 set -e
 
-HOMEASSISTANT_MAJOR_VERSION="2024.3"
+HOMEASSISTANT_MAJOR_VERSION="2026.2"
 export PIP_DEFAULT_TIMEOUT=100
 
 HOMEASSISTANT_VERSION=$(get_ha_version)
@@ -58,8 +59,8 @@ echo "=========================================="
 wget -q https://raw.githubusercontent.com/home-assistant/core/${HOMEASSISTANT_VERSION}/homeassistant/package_constraints.txt -O -
 wget -q https://raw.githubusercontent.com/home-assistant/core/${HOMEASSISTANT_VERSION}/requirements.txt -O -
 wget -q https://raw.githubusercontent.com/home-assistant/core/${HOMEASSISTANT_VERSION}/requirements_all.txt -O -
-# now we can fetch nabucasa version and its deps
-wget -q https://raw.githubusercontent.com/NabuCasa/hass-nabucasa/"$(get_version hass-nabucasa)"/setup.py -O - | grep '[>=]=' | sed -E 's/\s*"(.*)",?/\1/'
+# fetch nabucasa deps from pyproject.toml (migrated from setup.py)
+wget -q https://raw.githubusercontent.com/NabuCasa/hass-nabucasa/"$(get_version hass-nabucasa)"/pyproject.toml -O - | awk '/^dependencies = \[/,/^\]/' | grep '[>=]=' | sed -E 's/\s*"(.*)",?/\1/'
 ) >/tmp/ha_requirements.txt
 
 HOMEASSISTANT_FRONTEND_VERSION=$(get_version home-assistant-frontend)
@@ -74,7 +75,7 @@ fi
 rm -rf ${STORAGE_TMP}
 
 echo "Install base requirements from feed..."
-opkg update
+apk update
 
 PYTHON_VERSION=$(get_python_version)
 echo "Detected Python ${PYTHON_VERSION}"
@@ -82,18 +83,14 @@ LUMI_GATEWAY=$(is_lumi_gateway)
 GTW360_GATEWAY=$(is_gtw360)
 NEED_ZHA="$LUMI_GATEWAY$GTW360_GATEWAY"
 
-# Install them first to check Openlumi feed id added
-opkg install \
+apk add \
   python3-base \
-  python3-pynacl \
-  python3-ciso8601
+  python3-pynacl
 
-opkg install \
+apk add \
   patch \
   unzip \
   libjpeg-turbo \
-  python3-aiohttp \
-  python3-aiohttp-cors \
   python3-async-timeout \
   python3-asyncio \
   python3-attrs \
@@ -102,8 +99,6 @@ opkg install \
   python3-botocore \
   python3-certifi \
   python3-cffi \
-  python3-cgi \
-  python3-cgitb \
   python3-chardet \
   python3-codecs \
   python3-cryptodome \
@@ -114,7 +109,6 @@ opkg install \
   python3-dbm \
   python3-decimal \
   python3-defusedxml \
-  python3-distutils \
   python3-docutils \
   python3-email \
   python3-greenlet \
@@ -125,11 +119,9 @@ opkg install \
   python3-logging \
   python3-lzma \
   python3-markupsafe \
-  python3-multidict \
   python3-multiprocessing \
   python3-ncurses \
   python3-netdisco \
-  python3-netifaces \
   python3-openssl \
   python3-pillow \
   python3-pip \
@@ -152,17 +144,13 @@ opkg install \
   python3-urllib \
   python3-urllib3 \
   python3-xml \
-  python3-yaml \
-  python3-yarl
+  python3-yaml
 
-# openwrt < 22.03 doesn't have this package
-opkg install python3-pycares 2>/dev/null || true
+apk add python3-pycares 2>/dev/null || true
 if [ $BROKEN_NUMPY ]; then
-  # on intel N100 it might use missing CPU instructions. Remove it
-  opkg remove python3-numpy 2>/dev/null || true
+  apk del python3-numpy 2>/dev/null || true
 else
-  # numpy requires hard floating point support and is missing on some MIPS architectures
-  opkg install python3-numpy 2>/dev/null || true
+  apk add python3-numpy 2>/dev/null || true
 fi
 
 cd /tmp/
@@ -174,8 +162,22 @@ find /usr/lib/python${PYTHON_VERSION}/site-packages/numpy -iname tests -print0 |
 
 echo "Install base requirements from PyPI..."
 pip3 install --no-cache-dir wheel
+# Packages absent from the OpenWrt 25.12 feed or behind the required version;
+# installed before pip freeze so they appear in owrt_constraints.txt.
+# - aiohttp/aiohttp-cors/ciso8601: not in the 25.12 feed
+# - attrs 25.4.0: feed ships 23.1.0, too old for HA 2026.2
+# - aiodns 4.0.0: not in feed; triggers pip upgrade of pycares 4.10.0 → 5.0.1
+#   (aiodns 4.0.0 requires pycares>=5.0.0; musl wheels available for both archs)
+# - uv: hard HA runtime dependency (homeassistant/util/package.py), not in the feed
+pip3 install --no-cache-dir \
+  "aiohttp==3.13.3" \
+  "aiohttp-cors==0.8.1" \
+  "ciso8601==2.3.3" \
+  "attrs==25.4.0" \
+  "aiodns==4.0.0" \
+  "uv==0.9.26"
 pip3 freeze > /tmp/freeze.txt
-grep -E 'aiohttp|async-timeout|crypto|YAML' /tmp/freeze.txt > /tmp/owrt_constraints.txt
+grep -E 'aiohttp|async-timeout|crypto|YAML|ciso8601|pycares|cffi|pycparser' /tmp/freeze.txt > /tmp/owrt_constraints.txt
 
 cat << EOF > /tmp/requirements_nodeps.txt
 $(version aioesphomeapi)
@@ -194,6 +196,13 @@ sed -i -e 's/cryptography\(.*\)/cryptography >=36.0.2/' -e 's/chacha20poly1305-r
 
 cat << EOF > /tmp/requirements.txt
 tzdata>=2021.2.post0  # 2021.6+ requirement
+$(version aiozoneinfo)  # HA timezone util
+$(version annotatedyaml)  # HA YAML util
+$(version aiohasupervisor)  # HA supervisor client
+$(version aiohttp-asyncmdnsresolver)  # HA mDNS resolver
+$(version cronsim)  # HA automation scheduler
+$(version voluptuous-openapi)  # HA config validation
+$(version home-assistant-bluetooth)  # HA Bluetooth base types (used in core helpers)
 
 $(version atomicwrites-homeassistant)  # nabucasa dep
 $(version snitun)  # nabucasa dep
@@ -205,10 +214,9 @@ $(version voluptuous-serialize)
 # $(version sqlalchemy)  # recorder requirement
 $(version ulid-transform)  # utils
 $(version packaging)
-$(version aiohttp-fast-url-dispatcher)
 $(version psutil-home-assistant)
 $(version async-interrupt)
-#$(version aiohttp-zlib-ng)
+$(version aiohttp-fast-zlib)  # pure-Python zlib speedup, required by http component
 
 # homeassistant manifest requirements
 $(version PyQRCode)
@@ -216,10 +224,8 @@ $(version pyMetno)
 $(version mutagen)
 $(version pyotp)
 $(version gTTS)
-$(version janus)  # file_upload
 $(version securetar)  # backup
-$(version pyudev)  # usb
-$(version pycognito)
+$(version aiousbwatcher)  # usb
 $(version python-miio)  # xiaomi_miio
 $(version PyXiaomiGateway)
 $(version aiodhcpwatcher)  # dhcp
@@ -228,38 +234,40 @@ $(version httpx)  # image/http
 $(version hassil)  # conversation
 $(version home-assistant-intents)  # conversation
 $(version paho-mqtt)  # mqtt
+$(version pysnmp)  # snmp component (required by brother/__init__.py)
+$(version webrtc-models)  # web_rtc component (required by camera/__init__.py)
 
 # fixed dependencies
-python-jose[cryptography]==3.2.0  # (pycognito dep) 3.3.0 is not compatible with the python3-cryptography in the feed
-fnvhash==0.1.0  # replacement for fnv-hash-fast in recorder
-aiodns==3.4.0  # dependency of radios, newer versions require pycares > 4.9.0 while 4.4.0 is compiled in Openwrt
-radios==0.1.1  # radio_browser, newer versions require orjson
-async-upnp-client==0.36.2  # 0.38 requires aiohttp>=3.9
-
-# aioesphomeapi dependencies
-noiseprotocol
-protobuf<5
-aiohappyeyeballs
-chacha20poly1305-reuseable
+fnv-hash-fast==1.6.0  # cp313 musllinux wheels available; pure-Python workaround eliminated
+# aiodns installed in early pip block (aiodns==4.0.0); pycares upgraded to 5.0.1 by pip
+radios==0.3.2  # radio_browser
+async-upnp-client==0.46.2  # updated for aiohttp 3.13.3; old freeze was for aiohttp<3.9
 
 # extra services
 hass-configurator==0.4.1
+legacy-cgi  # cgi module removed in Python 3.13; hass-configurator still uses it
 EOF
 
 if [ $NEED_ZHA ]; then
   cat << EOF >> /tmp/requirements.txt
-# zha requirements
-$(version pyserial)
-$(version zha-quirks)
-$(version zigpy)
+# zha requirements (zha package pulls in zigpy, bellows, zigpy-zigate, and other backends)
+$(version zha)
+$(version serialx)
 EOF
 fi
 
-if [ $LUMI_GATEWAY ]; then
-  cat << EOF >> /tmp/requirements.txt
-$(version zigpy-zigate)
-EOF
-fi
+
+# netifaces: C extension, no musl wheel. Install netifaces2 (has musl wheels) and create a
+# compatibility shim so pip treats netifaces as already installed when building python-miio deps.
+pip3 install --no-cache-dir netifaces2
+SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+printf 'from netifaces2 import *\n' > "$SITE/netifaces.py"
+DIST="$SITE/netifaces-0.11.0.dist-info"
+mkdir -p "$DIST"
+printf 'Metadata-Version: 2.1\nName: netifaces\nVersion: 0.11.0\n' > "$DIST/METADATA"
+printf 'Wheel-Version: 1.0\nGenerator: shim\nRoot-Is-Purelib: true\nTag: py3-none-any\n' > "$DIST/WHEEL"
+printf 'netifaces.py,,\nnetifaces-0.11.0.dist-info/METADATA,,\nnetifaces-0.11.0.dist-info/WHEEL,,\nnetifaces-0.11.0.dist-info/INSTALLER,,\nnetifaces-0.11.0.dist-info/RECORD,,\n' > "$DIST/RECORD"
+printf 'pip\n' > "$DIST/INSTALLER"
 
 # TMPDIR=${STORAGE_TMP} pip3 install --no-cache-dir -c /tmp/owrt_constraints.txt -r /tmp/requirements.txt
 # install one-by-one to avoid memory issues
@@ -297,7 +305,9 @@ echo "Install hass_nabucasa and ha-frontend..."
 wget https://github.com/NabuCasa/hass-nabucasa/archive/${NABUCASA_VER}.tar.gz -O - > hass-nabucasa-${NABUCASA_VER}.tar.gz
 tar -zxf hass-nabucasa-${NABUCASA_VER}.tar.gz
 cd hass-nabucasa-${NABUCASA_VER}
-sed -i 's/[<=>]=.*"/"/' setup.py
+# strip version pins from whichever build file nabucasa uses
+[ -f setup.py ] && sed -i 's/[<=>]=.*"/"/' setup.py
+[ -f pyproject.toml ] && sed -i 's/[<=>]=.*"/"/' pyproject.toml
 rm -rf /usr/lib/python${PYTHON_VERSION}/site-packages/hass_nabucasa-*.egg
 pip3 install . --no-cache-dir -c /tmp/owrt_constraints.txt
 cd ..
@@ -357,6 +367,7 @@ analytics
 api
 application_credentials
 assist_pipeline
+assist_satellite
 auth
 automation
 backup
@@ -408,6 +419,7 @@ input_select
 input_text
 integration
 intent
+labs
 lawn_mower
 light
 local_todo
@@ -450,6 +462,7 @@ select
 sensor
 shopping_list
 siren
+snmp
 ssdp
 stream
 stt
@@ -478,6 +491,7 @@ wake_on_lan
 wake_word
 water_heater
 weather
+web_rtc
 webhook
 websocket_api
 workday
@@ -511,23 +525,19 @@ cd homeassistant-${HOMEASSISTANT_VERSION}/homeassistant/
 echo '' > requirements.txt
 sed -i "s/[>=]=.*//g" package_constraints.txt
 
-# replace LRU with simple dict
-sed -i -e 's/from lru import LRU/LRU = lambda x: dict()/' -e 's/lru.get_size()/128/' -e 's/lru.set_size/pass  # \0/' helpers/template.py
+# replace LRU with simple dict (helpers/template/ is a package in 2026.2)
+sed -i -e 's/from lru import LRU/LRU = lambda x: dict()/' -e 's/lru.get_size()/128/' -e 's/lru.set_size/pass  # \0/' helpers/template/__init__.py
 
 cd components
 
-# serve static with gzipped files
-sed -i -E 's/^( *)filepath.*?= (.*).joinpath\(filename\).resolve\(\)/\1try:\n\1    filepath = \2.joinpath(Path(str(filename) + ".gz")).resolve()\n\1    if not filepath.exists():\n\1        raise FileNotFoundError()\n\1except Exception as e:\n\1    filepath = \2.joinpath(filename).resolve()/' http/static.py
-sed -i -E 's/^( *)headers=\{/\0\n\1    **({hdrs.CONTENT_ENCODING: "gzip"} if filepath.suffix == ".gz" else {}),/' http/static.py
-
 # replace LRU with simple dict
-sed -i 's/, "lru-dict==[0-9\.]*"//' recorder/manifest.json
-sed -i 's/from lru import LRU/LRU = lambda x: dict()/' recorder/core.py
+# recorder/core.py and recorder/db_schema.py no longer use lru-dict in 2026.2
+# recorder manifest no longer lists lru-dict
 sed -i 's/from lru import LRU/LRU = lambda x: dict()/' recorder/table_managers/event_types.py
 sed -i -e 's/from lru import LRU/LRU = lambda x: dict()/' -e 's/lru.get_size()/128/' -e 's/lru.set_size/pass  # \0/' recorder/table_managers/__init__.py
 sed -i -e 's/from lru import LRU/LRU = lambda x: dict()/' -e 's/lru.get_size()/128/' -e 's/lru.set_size/pass  # \0/' recorder/table_managers/statistics_meta.py
 sed -i 's/from lru import LRU/LRU = lambda x: dict()/' http/static.py
-sed -i 's/from lru import LRU/LRU = lambda x: dict()/' esphome/entry_data.py
+# esphome/entry_data.py no longer uses lru-dict in 2026.2
 
 # relax dependencies
 sed -i 's/sqlalchemy==[0-9\.]*/sqlalchemy/i' recorder/manifest.json
@@ -551,12 +561,9 @@ sed -i 's/async-upnp-client==[0-9\.]*/async-upnp-client/i' ssdp/manifest.json
 cat esphome/manifest.json | tr '\n' '\r' | sed -E -e 's/, "bluetooth"//g' -e 's/(, )?"bleak[-_]esphome"//' -e 's/,\r    "bleak-esphome==[0-9.]*"//g' | tr '\r' '\n' > esphome/manifest-new.json
 mv esphome/manifest-new.json esphome/manifest.json
 sed -i -e 's/    config_entry.unique_id/    False/' -e 's/from homeassistant.components.bluetooth/#from homeassistant.components.bluetooth/' -e 's/async_scanner_by_source//' esphome/diagnostics.py
+sed -i 's/from homeassistant.components.bluetooth import async_remove_scanner/async_remove_scanner = lambda hass, mac: None/' esphome/__init__.py
 sed -i 's/from.*ESPHomeBluetoothDevice.*/ESPHomeBluetoothDevice = None/' esphome/entry_data.py
-sed -i 's/from.*ESPHomeBluetoothCache.*/ESPHomeBluetoothCache = dict/' esphome/domain_data.py
 sed -i -E 's/from.*async_connect_scanner.*/async def async_connect_scanner(*args, **kwargs): pass/' esphome/manager.py
-
-# Patch mqtt component in 2022.12
-sed -i -e 's/import mqtt/\0\nfrom .util import */g' -e 's/mqtt\.util\.//' mqtt/trigger.py
 
 # drop ffmpeg requirement from tts
 sed -i 's/, "ffmpeg"//' tts/manifest.json
@@ -565,8 +572,8 @@ sed -i 's/ ffmpeg,//' tts/__init__.py
 # drop matter requirement from google_assistant, it is a dependency for mobile_app
 sed -i -E 's/(\, *)?"matter"//' google_assistant/manifest.json
 
-# drop numpy dep from stream
-sed -i -e 's/"ha-av[^"]*", //' -e 's/, "numpy[^"]*"//' stream/manifest.json
+# drop av and numpy deps from stream (renamed from ha-av to av in 2026.2)
+sed -i -e 's/"av==[0-9\.]*", //' -e 's/, "numpy==[0-9\.]*"//' stream/manifest.json
 
 # soft float, like mips32 don't have numpy. Cut it off
 if ( ! ls /usr/lib/python${PYTHON_VERSION}/site-packages/ | grep -q numpy ); then
@@ -577,27 +584,30 @@ sed -i 's/import av/av = None/' stream/__init__.py
 sed -i 's/import av/av = None/' stream/worker.py
 sed -i 's/import av/av = None/' stream/recorder.py
 
-# replace c-based fnv hash
-sed -i 's/fnv-hash-fast==[0-9\.]*/fnvhash/i' recorder/manifest.json
-sed -i 's/from fnv_hash_fast/from fnvhash/' recorder/db_schema.py
+# fnv-hash-fast: cp313 musllinux wheels available on PyPI since 1.6.0; no workaround needed
 
 if [ $NEED_ZHA ]; then
-  # remove unwanted zha requirements
-  sed -i 's/"bellows==[0-9\.]*",//i' zha/manifest.json
-  sed -i 's/"zigpy-cc==[0-9\.]*",//i' zha/manifest.json
-  sed -i 's/"zigpy-deconz==[0-9\.]*",//i' zha/manifest.json
-  sed -i 's/"zigpy-xbee==[0-9\.]*",//i' zha/manifest.json
-  sed -i 's/"zigpy-znp==[0-9\.]*",//i' zha/manifest.json
-  sed -i 's/"universal-silabs-flasher==[0-9\.]*",//i' zha/manifest.json
-  sed -i 's/RadioType.ezsp/object()  # \0/' zha/__init__.py
+  # relax version pins — all Zigbee backends now bundled as deps of the zha PyPI package
+  sed -i 's/"zha==[0-9\.]*"/"zha"/i' zha/manifest.json
+  sed -i 's/"serialx==[0-9\.]*"/"serialx"/i' zha/manifest.json
 
-  sed -i -E -e 's/import (bellows|zigpy_deconz|zigpy_cc|zigpy_xbee|zigpy_znp|zigpy_zigate).*application/# \0/' -e 's/([ ]*)([a-z_.]*.ControllerApplication,)/\1None # \2/g' zha/core/const.py
-  sed -i -E 's/"(bellows|zigpy_deconz|zigpy_xbee|zigpy_znp|zigpy_zigate)":/# "\1":/' zha/diagnostics.py
-  # sed -i -E 's/import (bellows|zigpy_deconz|zigpy_xbee|zigpy_znp)/# import \1/' zha/diagnostics.py
-  sed -i -e '/from homeassistant.components.homeassistant_hardware.silabs_multiprotocol_addon/,/] = 15/d' zha/core/gateway.py
-  sed -i 's/    RadioType\./    # RadioType./' zha/radio_manager.py
-  sed -i 's/from bellows.config import CONF_USE_THREAD/from .core.const import CONF_USE_THREAD/' zha/radio_manager.py
-  sed -i -e 's/from homeassistant.components.homeassistant_hardware import silabs_multiprotocol_addon/silabs_multiprotocol_addon = None  #/' -e 's/from homeassistant.components.homeassistant_yellow/yellow_hardware = None  #/' -e 's/ports = await hass/return await hass/' zha/config_flow.py
+  # stub homeassistant_hardware helpers in __init__.py (not installed on OpenWrt)
+  cat zha/__init__.py | tr '\n' '\r' | sed -E 's/from homeassistant\.components\.homeassistant_hardware\.helpers import \(\r    async_is_firmware_update_in_progress,\r    async_notify_firmware_info,\r    async_register_firmware_info_provider,\r\)/async_is_firmware_update_in_progress = lambda *a, **kw: False\rasync_notify_firmware_info = lambda *a, **kw: None\rasync_register_firmware_info_provider = lambda *a, **kw: None/' | tr '\r' '\n' > zha/__init__-new.py
+  mv zha/__init__-new.py zha/__init__.py
+
+  # stub ZigbeeFlowStrategy (from homeassistant_hardware, not installed on OpenWrt)
+  # needed in both config_flow.py and radio_manager.py
+  for f in zha/config_flow.py zha/radio_manager.py; do
+    cat "$f" | tr '\n' '\r' | sed -E 's/from homeassistant\.components\.homeassistant_hardware\.firmware_config_flow import \(\r    ZigbeeFlowStrategy,\r\)/class ZigbeeFlowStrategy(str):\r    RECOMMENDED = "recommended"\r    ADVANCED = "advanced"/' | tr '\r' '\n' > "${f}-new"
+    mv "${f}-new" "$f"
+  done
+  sed -i -e 's/from homeassistant.components.homeassistant_hardware import silabs_multiprotocol_addon/silabs_multiprotocol_addon = None  #/' -e 's/from homeassistant.components.homeassistant_yellow import hardware as yellow_hardware/yellow_hardware = None  #/' zha/config_flow.py
+
+  # stub local zha/homeassistant_hardware.py (imports from global homeassistant_hardware)
+  cp zha/homeassistant_hardware.py zha/__homeassistant_hardware.py
+cat <<'EOF' > zha/homeassistant_hardware.py
+def get_firmware_info(hass, config_entry): return None
+EOF
 
   cp zha/repairs/wrong_silabs_firmware.py zha/repairs/__wrong_silabs_firmware.py
 cat <<'EOF' > zha/repairs/wrong_silabs_firmware.py
@@ -607,16 +617,8 @@ class AlreadyRunningEZSP(Exception): pass
 EOF
 fi
 
-if [ $LUMI_GATEWAY ]; then
-  sed -i 's/"zigpy-zigate[<=>]=[0-9\.]*"/"zigpy-zigate"/i' zha/manifest.json
-  sed -i -E -e 's/#[ ]*(.*zigate.*application)/\1/' -e 's/None (zigpy_zigate)/\1/' zha/core/const.py
-  sed -i -E 's/# ("zigpy_zigate")/\1/' zha/diagnostics.py
-  sed -i 's/    # RadioType\.zigate/    RadioType.zigate/' zha/radio_manager.py
-fi
-if [ $GTW360_GATEWAY ]; then
-  sed -i 's/"zigpy-zigate[<=>]=[0-9\.]*"/"zigpy-zboss"/i' zha/manifest.json
-  sed -i -E -e 's/import.*zigpy_znp.*application/\0\nimport zigpy_zboss.zigbee.application/' -e 's/([ ]*)xbee = [(]/\1zboss = ("ZBOSS = Nordic ZBOSS Zigbee radios: nRF52840, nrf5340", zigpy_zboss.zigbee.application.ControllerApplication)\n\0/' zha/core/const.py
-fi
+# Lumi Gateway (zigate): zigpy-zigate is now a direct dep of zha==0.0.90 — no manifest patch needed
+# GTW360 Gateway (zboss): zigpy-zboss is NOT in zha deps; zboss pip install is handled above
 
 sed -i 's/"cloud",//' default_config/manifest.json
 sed -i 's/"dhcp",//' default_config/manifest.json
@@ -654,22 +656,16 @@ else
 fi
 
 # backport orjson to classic json
-# helpers
+# helpers/json.py
 sed -i -e 's/orjson/json/' -e 's/\.decode(.*)//' -e 's/option=.*,/\n/' -e 's/.as_posix/.as_posix()\n    if isinstance(obj, (datetime.date, datetime.time)):\n        return obj.isoformat/' -e 's/json_bytes /json_bytes_old /' -e 's/return json_bytes(data)/return _json_default_encoder(data)/' -e 's/json_fragment = .*/json_fragment = json.loads/' -e 's/mode = "wb"/mode = "w"/' homeassistant/helpers/json.py
 echo 'def json_bytes(data): return json.dumps(data, default=json_encoder_default).encode("utf-8")' >> homeassistant/helpers/json.py
-# util
+# util/json.py
 sed -i -e 's/orjson/json/' -e 's/\.decode(.*)//' -e 's/option=.*/\n/' homeassistant/util/json.py
-# aiohttp_client.py
-sed -i -e 's/orjson/json/' -e 's/\.decode(.*)//' homeassistant/helpers/aiohttp_client.py
-sed -i -E -e 's/orjson/json/g' -e 's/\.decode(.*)//' -e 's/(b64(de|en)code.*?)/\1.decode("utf-8")/' -e 's/option=option/#option=option/' -e 's/json.OPT_[A-Z_0-9]*/0/g'  homeassistant/helpers/template.py
-
-# disable aiohttp_zlib_ng
-sed -i -E -e 's/"aiohttp-zlib-ng[^"]*"//' -e 's/(dispatcher[^,]*?),/\1/' homeassistant/components/http/manifest.json
-sed -i -e 's/from aiohttp_zlib_ng/#from aiohttp_zlib_ng/' -e 's/enable_zlib_ng/#enable_zlib_ng/' homeassistant/components/http/__init__.py
-
-# fix for aiohttp < 3.9 (3.8.5 in 23.05)
-# TODO: revert https://github.com/home-assistant/core/pull/104175
-sed -i 's/, handler_cancellation=True/,  # \0/' homeassistant/components/http/__init__.py
+# helpers/template/__init__.py (was helpers/template.py before 2026.2)
+# aiohttp_client.py no longer uses orjson in 2026.2 — patch removed
+sed -i -E -e 's/orjson/json/g' -e 's/\.decode(.*)//' -e 's/(b64(de|en)code.*?)/\1.decode("utf-8")/' -e 's/option=option/#option=option/' -e 's/json.OPT_[A-Z_0-9]*/0/g' homeassistant/helpers/template/__init__.py
+# aiohttp_zlib_ng: replaced by aiohttp_fast_zlib (pure Python) in 2026.2 — patches removed
+# handler_cancellation: supported in aiohttp >= 3.9; we use 3.13.3 — patch removed
 
 # Patch installation type
 sed -i 's/"installation_type": "Unknown"/"installation_type": "Home Assistant on OpenWrt"/' homeassistant/helpers/system_info.py

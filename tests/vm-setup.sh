@@ -1,9 +1,13 @@
 #!/bin/bash
-# One-time setup: download the OpenWrt 25.12.3 x86_64 image, resize it to 2 GB,
-# expand the root partition, and patch the network config so that QEMU user-mode
-# networking can reach the VM via SSH port-forward (tcp::2222->:22).
+# One-time setup: download the OpenWrt image for the given architecture, resize it
+# to 2 GB, expand the root partition, and patch the network config so that QEMU
+# user-mode networking can reach the VM via SSH port-forward.
+#
+# Usage: ./vm-setup.sh [arch]
+#   arch: x86_64 (default) or aarch64
 #
 # Requires: qemu-img, parted, e2fsck, resize2fs, debugfs, dd, python3
+#   For aarch64: sudo apt-get install qemu-system-arm qemu-efi-aarch64
 # Does NOT require sudo — all operations work on regular files in userspace.
 # Idempotent: skips steps that are already done.
 
@@ -12,17 +16,37 @@ set -euo pipefail
 # Force C locale so parted/e2fsprogs output is in English regardless of system locale.
 export LC_ALL=C
 
+ARCH="${1:-x86_64}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMG="$SCRIPT_DIR/openwrt-25.12.3-x86-64-generic-ext4-combined.img"
+
+case "$ARCH" in
+    x86_64)
+        IMG_NAME="openwrt-25.12.3-x86-64-generic-ext4-combined.img"
+        IMG_URL="https://downloads.openwrt.org/releases/25.12.3/targets/x86/64/openwrt-25.12.3-x86-64-generic-ext4-combined.img.gz"
+        SSH_PORT=2222
+        ;;
+    aarch64)
+        IMG_NAME="openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img"
+        IMG_URL="https://downloads.openwrt.org/releases/25.12.3/targets/armsr/armv8/openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img.gz"
+        SSH_PORT=2223
+        ;;
+    *)
+        echo "Unknown arch '$ARCH'. Supported: x86_64, aarch64" >&2
+        exit 1
+        ;;
+esac
+
+IMG="$SCRIPT_DIR/$IMG_NAME"
 IMG_GZ="${IMG}.gz"
-IMG_URL="https://downloads.openwrt.org/releases/25.12.3/targets/x86/64/openwrt-25.12.3-x86-64-generic-ext4-combined.img.gz"
 TARGET_SIZE="2G"
 TARGET_BYTES=$((2 * 1024 * 1024 * 1024))
+
+echo "=== OpenWrt VM setup: $ARCH (SSH port $SSH_PORT) ==="
 
 # ── Step 1: download ──────────────────────────────────────────────────────────
 if [[ ! -f "$IMG" ]]; then
     if [[ ! -f "$IMG_GZ" ]]; then
-        echo "Downloading OpenWrt 25.12.3 x86_64 image..."
+        echo "Downloading OpenWrt 25.12.3 $ARCH image..."
         wget -O "$IMG_GZ" "$IMG_URL"
     else
         echo "Found existing .gz, skipping download."
@@ -41,6 +65,14 @@ if [[ "$CURRENT_SIZE" -lt "$TARGET_BYTES" ]]; then
     qemu-img resize -f raw "$IMG" "$TARGET_SIZE"
 else
     echo "Image already at $TARGET_SIZE, skipping resize."
+fi
+
+# After resizing a GPT image the backup GPT header is stranded at the old end
+# of the disk. parted cannot resize partitions until the header is relocated.
+# sgdisk --move-second-header does this; it exits non-zero on MBR images, so
+# we suppress the error and let parted handle MBR disks normally.
+if sgdisk --move-second-header "$IMG" > /dev/null 2>&1; then
+    echo "GPT backup header relocated to end of disk."
 fi
 
 # ── Step 3: expand partition 2 to fill the disk ───────────────────────────────
@@ -97,8 +129,8 @@ fi
 
 # ── Step 5: inject uci-defaults script for QEMU SSH networking ───────────────
 #
-# Goal: make the VM reachable via SSH on host port 2222 using QEMU's user-mode
-# (SLIRP) networking with a hostfwd tcp::2222->:22 rule.
+# Goal: make the VM reachable via SSH on host port $SSH_PORT using QEMU's
+# user-mode (SLIRP) networking with a hostfwd tcp::${SSH_PORT}->:22 rule.
 #
 # Why not patch /etc/config/network directly?
 #   We tried writing a DHCP config to /etc/config/network via debugfs before
@@ -123,7 +155,7 @@ fi
 #
 # NIC assignment in QEMU (see vm-start.sh):
 #   NIC 1 (eth0) → first -nic argument  → br-lan, 192.168.1.1, untouched
-#   NIC 2 (eth1) → second -nic argument, hostfwd tcp::2222->:22 → DHCP
+#   NIC 2 (eth1) → second -nic argument, hostfwd tcp::${SSH_PORT}->:22 → DHCP
 #
 # The uci-defaults script configures eth1 as a DHCP interface named 'qemu'
 # and adds it to the LAN firewall zone, which allows incoming SSH.
@@ -141,8 +173,8 @@ else
     trap 'rm -f "$TMPPART" "$UCISCRIPT"' EXIT
     cat > "$UCISCRIPT" <<'UCIEOF'
 #!/bin/sh
-# Configure eth1 (QEMU second NIC, hostfwd tcp::2222->:22) for DHCP and
-# place it in the LAN firewall zone so that SSH is reachable from the host.
+# Configure eth1 (QEMU second NIC) for DHCP and place it in the LAN firewall
+# zone so that SSH is reachable from the host via the hostfwd port-forward.
 uci set network.qemu=interface
 uci set network.qemu.device=eth1
 uci set network.qemu.proto=dhcp
@@ -160,4 +192,4 @@ UCIEOF
 fi
 
 echo ""
-echo "Setup complete. Run ./vm-start.sh to boot the VM."
+echo "Setup complete. Run ./vm-start.sh $ARCH to boot the VM."
