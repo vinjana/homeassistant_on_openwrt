@@ -12,6 +12,7 @@ It is distributed with a shell script that downloads and installs everything tha
 - 256 MB RAM
 - OpenWrt 23.05.0 or newer installed
 
+
 ## Generic installation
 Then, download the installer and run it.
 
@@ -23,7 +24,7 @@ After script prints `Done.` you have Home Assistant installed.
 Start the service or reboot the device to get it start automatically.
 The web interface will be on 8123 port after all components load.
 
-![Home Assitant](homeassistant.png)
+![Home Assistant](homeassistant.png)
 
 The only components with flows included are MQTT and ZHA.
 After adding a component in the interface or via the config
@@ -32,6 +33,69 @@ In this case restarting HA could work.
 
 Other components are not tested and may require additional changed in 
 requirement versions or python libraries.
+
+## Installing on external storage
+
+Home Assistant requires roughly 250 MB of storage for its Python packages.
+If your router's internal flash is too small, mount an external disk and bind-mount
+it over the Python site-packages directory **before** running `ha_install.sh`.
+
+This approach keeps the router's core function (networking, firewall) on internal flash
+and only the HA packages on the external disk.
+If the external disk fails, the router keeps routing and HA simply fails to start —
+recovering is a matter of attaching a new disk and re-running the install script.
+
+### Prerequisites
+
+Install USB storage support (once, requires a working internet connection):
+
+```sh
+apk update
+apk add block-mount kmod-usb-storage kmod-fs-ext4 e2fsprogs
+```
+
+### Set up the external disk
+
+Format the disk (skip if already formatted):
+
+```sh
+mkfs.ext4 /dev/sda1
+```
+
+Create mount points and mount the disk:
+
+```sh
+mkdir -p /mnt/external
+mount /dev/sda1 /mnt/external
+mkdir -p /mnt/external/python-packages
+```
+
+Determine your Python version:
+
+```sh
+python3 --version    # e.g. Python 3.13.x
+```
+
+Bind-mount the site-packages directory so pip writes to the external disk:
+
+```sh
+mount --bind /mnt/external/python-packages /usr/lib/python3.13/site-packages
+```
+
+Replace `3.13` with the actual major.minor version if different.
+
+Make both mounts persistent across reboots by adding them to `/etc/fstab`:
+
+```
+/dev/sda1                          /mnt/external                ext4  defaults          0 0
+/mnt/external/python-packages      /usr/lib/python3.13/site-packages  none  bind,nofail  0 0
+```
+
+The `nofail` option on the bind mount ensures the router still boots cleanly if the
+external disk is absent (HA will not start, but routing and networking are unaffected).
+
+Now proceed with the normal installation below.
+
 
 ## ZHA usage on Xiaomi Gateway
 
