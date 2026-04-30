@@ -11,17 +11,11 @@
 set -uo pipefail
 
 ARCH="${1:-x86_64}"
-case "$ARCH" in
-    x86_64)  SSH_PORT=2222 ;;
-    aarch64) SSH_PORT=2223 ;;
-    *)
-        echo "Unknown arch '$ARCH'. Supported: x86_64, aarch64" >&2
-        exit 1
-        ;;
-esac
-
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
-SSH="ssh $SSH_OPTS root@localhost -p $SSH_PORT"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=vm-lib.sh
+source "$SCRIPT_DIR/vm-lib.sh"
+arch_config "$ARCH"
+init_ssh
 PASS=0
 FAIL=0
 
@@ -29,12 +23,12 @@ check() {
     local description="$1"
     local command="$2"
     printf "  %-55s" "$description"
-    if $SSH "$command" >/dev/null 2>&1; then
+    if ssh_run "$command" >/dev/null 2>&1; then
         echo "PASS"
-        (( PASS++ )) || true
+        PASS=$(( PASS + 1 ))
     else
         echo "FAIL"
-        (( FAIL++ )) || true
+        FAIL=$(( FAIL + 1 ))
     fi
 }
 
@@ -44,20 +38,20 @@ check_output() {
     local expected="$3"
     printf "  %-55s" "$description"
     local output
-    output=$($SSH "$command" 2>/dev/null)
+    output=$(ssh_run "$command" 2>/dev/null)
     if echo "$output" | grep -q "$expected"; then
         echo "PASS"
-        (( PASS++ )) || true
+        PASS=$(( PASS + 1 ))
     else
         echo "FAIL  (got: $output)"
-        (( FAIL++ )) || true
+        FAIL=$(( FAIL + 1 ))
     fi
 }
 
 echo "=== OpenWrt VM Operational Qualification ($ARCH) ==="
 echo ""
 
-if ! $SSH 'echo ok' 2>/dev/null; then
+if ! check_ssh; then
     echo "ERROR: VM not reachable. Run ./vm-start.sh $ARCH first." >&2
     exit 1
 fi
@@ -87,38 +81,38 @@ check "hass service starts"  "/etc/init.d/homeassistant start"
 # because the API requires auth in HA 2026+ and returns HTTP 401.
 printf "  %-55s" "port 8123 responds"
 HA_UP=0
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     sleep 3
-    if $SSH "grep -q '1FBB' /proc/net/tcp /proc/net/tcp6 2>/dev/null" 2>/dev/null; then
+    if ssh_run "grep -q '1FBB' /proc/net/tcp /proc/net/tcp6 2>/dev/null" 2>/dev/null; then
         echo "PASS"
-        (( PASS++ )) || true
+        PASS=$(( PASS + 1 ))
         HA_UP=1
         break
     fi
 done
 if [[ $HA_UP -eq 0 ]]; then
     echo "FAIL  (timeout)"
-    (( FAIL++ )) || true
+    FAIL=$(( FAIL + 1 ))
 fi
 
 check "hass-configurator starts"  "/etc/init.d/hass-configurator start"
 
-# Wait up to 30 seconds for hass-configurator to bind port 3218 (hex 0C92).
+# Wait up to 30 seconds for hass-configurator to bind port 3218 (hex 0C92 = 3218).
 # The init script returns before the process has bound the socket.
 printf "  %-55s" "hass-configurator port 3218"
 HC_UP=0
-for i in $(seq 1 10); do
+for _ in $(seq 1 10); do
     sleep 3
-    if $SSH "grep -q '0C92' /proc/net/tcp /proc/net/tcp6 2>/dev/null" 2>/dev/null; then
+    if ssh_run "grep -q '0C92' /proc/net/tcp /proc/net/tcp6 2>/dev/null" 2>/dev/null; then
         echo "PASS"
-        (( PASS++ )) || true
+        PASS=$(( PASS + 1 ))
         HC_UP=1
         break
     fi
 done
 if [[ $HC_UP -eq 0 ]]; then
     echo "FAIL  (timeout)"
-    (( FAIL++ )) || true
+    FAIL=$(( FAIL + 1 ))
 fi
 
 echo ""

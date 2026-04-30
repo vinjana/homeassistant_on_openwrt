@@ -18,26 +18,20 @@ fi
 
 INSTALL_SCRIPT="${1:-$SCRIPT_DIR/../ha_install.sh}"
 
-case "$ARCH" in
-    x86_64)  SSH_PORT=2222 ;;
-    aarch64) SSH_PORT=2223 ;;
-    *)
-        echo "Unknown arch '$ARCH'. Supported: x86_64, aarch64" >&2
-        exit 1
-        ;;
-esac
-
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
+# shellcheck source=vm-lib.sh
+source "$SCRIPT_DIR/vm-lib.sh"
+arch_config "$ARCH"
+init_ssh
 
 if [[ ! -f "$INSTALL_SCRIPT" ]]; then
     echo "Install script not found: $INSTALL_SCRIPT" >&2
     exit 1
 fi
 
-if ! ssh $SSH_OPTS root@localhost -p "$SSH_PORT" 'echo ok' 2>/dev/null; then
+if ! check_ssh; then
     echo "VM ($ARCH) is not reachable. Run ./vm-start.sh $ARCH first." >&2
     exit 1
 fi
 
 echo "Running $(basename "$INSTALL_SCRIPT") on $ARCH VM..."
-ssh $SSH_OPTS root@localhost -p "$SSH_PORT" 'sh -s' < "$INSTALL_SCRIPT"
+ssh_run 'sh -s' < "$INSTALL_SCRIPT"

@@ -6,7 +6,7 @@
 # Usage: ./vm-setup.sh [arch]
 #   arch: x86_64 (default) or aarch64
 #
-# Requires: qemu-img, parted, e2fsck, resize2fs, debugfs, dd, python3
+# Requires: qemu-img, parted, e2fsck, resize2fs, debugfs, dd, python3, gdisk
 #   For aarch64: sudo apt-get install qemu-system-arm qemu-efi-aarch64
 # Does NOT require sudo — all operations work on regular files in userspace.
 # Idempotent: skips steps that are already done.
@@ -18,23 +18,9 @@ export LC_ALL=C
 
 ARCH="${1:-x86_64}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-case "$ARCH" in
-    x86_64)
-        IMG_NAME="openwrt-25.12.3-x86-64-generic-ext4-combined.img"
-        IMG_URL="https://downloads.openwrt.org/releases/25.12.3/targets/x86/64/openwrt-25.12.3-x86-64-generic-ext4-combined.img.gz"
-        SSH_PORT=2222
-        ;;
-    aarch64)
-        IMG_NAME="openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img"
-        IMG_URL="https://downloads.openwrt.org/releases/25.12.3/targets/armsr/armv8/openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img.gz"
-        SSH_PORT=2223
-        ;;
-    *)
-        echo "Unknown arch '$ARCH'. Supported: x86_64, aarch64" >&2
-        exit 1
-        ;;
-esac
+# shellcheck source=vm-lib.sh
+source "$SCRIPT_DIR/vm-lib.sh"
+arch_config "$ARCH"
 
 IMG="$SCRIPT_DIR/$IMG_NAME"
 IMG_GZ="${IMG}.gz"
@@ -58,7 +44,8 @@ else
 fi
 
 # ── Step 2: resize image file to 2 GB ────────────────────────────────────────
-CURRENT_SIZE=$(qemu-img info --output=json "$IMG" | python3 -c "import json,sys; print(json.load(sys.stdin)['virtual-size'])")
+CURRENT_SIZE=$(qemu-img info --output=json "$IMG" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['virtual-size'])")
 
 if [[ "$CURRENT_SIZE" -lt "$TARGET_BYTES" ]]; then
     echo "Resizing image file to $TARGET_SIZE..."
@@ -186,10 +173,17 @@ UCIEOF
     debugfs -w "$TMPPART" -R "write $UCISCRIPT /etc/uci-defaults/99-qemu-ssh" 2>/dev/null
     # Mark executable so /lib/functions/boot.sh will run it.
     debugfs -w "$TMPPART" -R "set_inode_field /etc/uci-defaults/99-qemu-ssh i_mode 0100755" 2>/dev/null
+    # debugfs bypasses normal VFS bookkeeping and can leave stale directory
+    # entries; e2fsck repairs any inconsistencies before the partition is
+    # written back.
+    e2fsck -f -y "$TMPPART" >/dev/null 2>&1 || true
     echo "Writing partition back to image..."
     dd if="$TMPPART" of="$IMG" bs=512 seek="$PART2_START" count="$PART2_COUNT" conv=notrunc status=none
     echo "uci-defaults script injected."
 fi
+
+# ── Step 6: snapshot pristine image ──────────────────────────────────────────
+save_pristine
 
 echo ""
 echo "Setup complete. Run ./vm-start.sh $ARCH to boot the VM."

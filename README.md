@@ -12,12 +12,12 @@ It is distributed with a shell script that downloads and installs everything tha
 - 256 MB RAM
 - OpenWrt 23.05.0 or newer installed
 
-
 ## Generic installation
-Then, download the installer and run it.
+Then, download the installer and run it. For instance:
 
 ```sh
-wget https://raw.githubusercontent.com/openlumi/homeassistant_on_openwrt/23.05/ha_install.sh -O - | sh
+ha_version=25.12
+wget https://raw.githubusercontent.com/openlumi/homeassistant_on_openwrt/$ha_version/ha_install.sh -O - | sh
 ```
 
 After script prints `Done.` you have Home Assistant installed. 
@@ -226,3 +226,8 @@ them as `ipk` packages.
 If the dependency is already installed via opkg or via pip3 you may want
 to fix the strict dependency in `manifest.json` to a weaker one or remove 
 versions at all.
+
+## Code testing
+
+The code has been tested with OpenWRT VMs on x86_64 and aarch64 architectures.
+Reproducible tests are described in [tests/README.md](tests/README.md).

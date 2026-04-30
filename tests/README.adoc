@@ -11,6 +11,13 @@ The goal is *operational qualification*, not functional testing of Home Assistan
 we verify that the install script completes, that all Python native libraries load correctly,
 and that Home Assistant starts and answers on port 8123.
 
+`vm-test.sh` is the primary entry point for end-to-end test runs.
+The individual `vm-*.sh` scripts remain available for single-step use.
+All scripts share a common library, `vm-lib.sh`, which provides arch configuration
+(`arch_config`), SSH helpers (`init_ssh`, `ssh_run`, `wait_for_ssh`), PID file
+management (`pid_write`, `pid_running`, `pid_kill`), and pristine image snapshotting
+(`save_pristine`, `restore_pristine`).
+
 Testing is staged from cheapest to closest-to-reality:
 
 [cols="1,2,2",options="header"]
@@ -32,6 +39,7 @@ sudo apt-get install \
     qemu-system-x86 \   # qemu-system-x86_64 binary
     qemu-utils \        # qemu-img (image resize)
     parted \            # partition table manipulation (no root needed on image files)
+    gdisk \             # sgdisk (relocate GPT backup header after image resize)
     e2fsprogs \         # e2fsck, resize2fs, dumpe2fs, debugfs
     openssh-client \    # ssh, scp
     wget                # image download
@@ -73,14 +81,41 @@ cd tests/
 This script requires no `sudo`. All operations work on regular files in userspace:
 
 . Downloads the OpenWrt 25.12.3 x86_64 combined ext4 image (skips if already present).
-. Extends the image file to 2 GB with `qemu-img resize`.
+. Extends the image file to 2 GB with `qemu-img resize`; relocates the GPT backup header with `sgdisk`.
 . Expands partition 2 using `parted` on the image file (no block device needed).
-. Expands the ext4 filesystem using `resize2fs -o <offset>` (byte-offset mode, no loop device needed).
-. Patches `/etc/config/network` to use DHCP instead of the default static 192.168.1.1,
-  using `debugfs` on an extracted copy of the partition (no mount needed),
+. Extracts the partition to a temp file, expands the ext4 filesystem with `resize2fs`, and writes it back with `dd` (no loop device or root needed).
+. Injects a `uci-defaults` script via `debugfs` that configures a second NIC (eth1) for DHCP
   so that QEMU's user-mode networking can reach the VM via the SSH port-forward.
+. Saves a pristine snapshot (`*.pristine.img`) of the fully-configured base image.
+  Subsequent test runs restore from this snapshot instead of re-downloading.
 
 The script is idempotent — safe to re-run.
+
+=== End-to-end test run
+
+[source,bash]
+----
+./vm-test.sh           # restore from pristine → start → install → qualify → stop
+----
+
+If any step fails the VM is stopped automatically.
+To run a specific step only:
+
+[source,bash]
+----
+./vm-test.sh --step setup    # restore working image from pristine snapshot (fast)
+./vm-test.sh --step start    # start VM and wait for SSH
+./vm-test.sh --step run      # pipe ha_install.sh to the VM
+./vm-test.sh --step qualify  # run qualification checks
+./vm-test.sh --step stop     # stop VM
+./vm-test.sh --step all      # same as no --step: full run
+----
+
+To use a different install script:
+[source,bash]
+----
+./vm-test.sh x86_64 /path/to/modified_ha_install.sh
+----
 
 === Running the VM
 
@@ -110,20 +145,22 @@ On failure, fix `ha_install.sh`, stop and restart the VM (to get a clean state),
 
 === Resetting to a clean state
 
+Restore the working image from the pristine snapshot (instant on CoW filesystems):
+
 [source,bash]
 ----
-./vm-stop.sh
-./vm-setup.sh          # re-runs idempotently; image already patched, so fast
-./vm-start.sh
+./vm-test.sh --step setup
 ----
 
-If you need a truly fresh image (e.g. to test from scratch after a failed partial install),
-delete the image and re-run setup:
+If you need to recreate the pristine snapshot itself (e.g. after changing the base image
+configuration), delete both images and re-run setup:
+
 [source,bash]
 ----
 ./vm-stop.sh
 rm tests/openwrt-25.12.3-x86-64-generic-ext4-combined.img
-./vm-setup.sh
+rm tests/openwrt-25.12.3-x86-64-generic-ext4-combined.pristine.img
+./vm-setup.sh          # re-downloads, re-patches, and saves a new pristine snapshot
 ----
 
 === Operational qualification
@@ -161,29 +198,33 @@ cd tests/
 ./vm-setup.sh aarch64
 ----
 
-=== Running the VM
+=== End-to-end test run
 
 [source,bash]
 ----
-./vm-start.sh aarch64     # boots VM, waits for SSH on port 2223
-./vm-stop.sh aarch64      # shuts down the VM
+./vm-test.sh aarch64
 ----
 
 aarch64 uses TCG software emulation (no KVM), so boot and install are significantly slower
 than Stage 1. Allow 10–20 minutes for `ha_install.sh` to complete.
 
-=== Installing Home Assistant
+The `--step` flag works the same as for x86_64.
+
+=== Resetting to a clean state
 
 [source,bash]
 ----
-./vm-run.sh aarch64
+./vm-test.sh --step setup aarch64
 ----
 
-=== Operational qualification
+To recreate the pristine snapshot:
 
 [source,bash]
 ----
-./vm-qualify.sh aarch64
+./vm-stop.sh aarch64
+rm tests/openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img
+rm tests/openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.pristine.img
+./vm-setup.sh aarch64
 ----
 
 == Stage 3: OpenWrt One (physical hardware)
@@ -205,20 +246,22 @@ The recommended workflow for fixing issues in `ha_install.sh`:
 [source,bash]
 ----
 # 1. edit ha_install.sh on the host
-# 2. reset the VM to a clean state  (replace x86_64 with aarch64 as needed)
-./vm-stop.sh x86_64 && ./vm-start.sh x86_64
-# 3. run the install
-./vm-run.sh x86_64
-# 4. if it completes, run qualification
-./vm-qualify.sh x86_64
-# 5. repeat from 1 until all checks pass
+# 2. run the full test cycle (restores pristine, installs, qualifies, stops)
+./vm-test.sh x86_64
+# 3. repeat from 1 until all checks pass
+# 4. repeat on aarch64
+./vm-test.sh aarch64
 ----
 
-To get a truly fresh image after a failed partial install:
+To inspect the VM mid-run, use single-step mode:
+
 [source,bash]
 ----
-./vm-stop.sh x86_64
-rm tests/openwrt-25.12.3-x86-64-generic-ext4-combined.img
-./vm-setup.sh x86_64    # re-downloads and re-patches
-./vm-start.sh x86_64
+./vm-test.sh --step setup x86_64   # restore pristine
+./vm-test.sh --step start x86_64   # start VM
+# ... connect manually, inspect, iterate ...
+ssh -o StrictHostKeyChecking=no root@localhost -p 2222
+./vm-test.sh --step run x86_64     # run install
+./vm-test.sh --step qualify x86_64 # qualify
+./vm-test.sh --step stop x86_64    # stop
 ----
