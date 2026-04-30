@@ -12,21 +12,18 @@ we verify that the install script completes, that all Python native libraries lo
 and that Home Assistant starts and answers on port 8123.
 
 `vm-test.sh` is the primary entry point for end-to-end test runs.
+
 The individual `vm-*.sh` scripts remain available for single-step use.
+
 All scripts share a common library, `vm-lib.sh`, which provides arch configuration
 (`arch_config`), SSH helpers (`init_ssh`, `ssh_run`, `wait_for_ssh`), PID file
 management (`pid_write`, `pid_running`, `pid_kill`), and pristine image snapshotting
 (`save_pristine`, `restore_pristine`).
 
-Testing is staged from cheapest to closest-to-reality:
+Tests can be run on
 
-[cols="1,2,2",options="header"]
-|===
-|Stage |Environment |What it catches
-|1 |x86_64 QEMU VM (KVM) |Package manager, Python 3.13 compat, pure-Python deps, fast iteration
-|2 |aarch64 QEMU VM (TCG emulation) |Binary wheel availability for `aarch64-musllinux`, arch-specific feed packages
-|3 |OpenWrt One (physical) |Final real-hardware qualification
-|===
+. x86_64 QEMU VMs: This uses KVM and should be relatively fast, but the architecture will probably deviate from your OpenWRT system.
+. aarch64 QEMU VMs: This uses TCG and should be slower but with the same architecture as your OpenWRT system.
 
 == Prerequisites
 
@@ -53,22 +50,8 @@ sudo apt-get install \
     qemu-efi-aarch64    # UEFI firmware (QEMU_EFI.fd) required to boot the armsr/armv8 image
 ----
 
-NOTE: `python3` (used by `qemu-img info` output parsing in `vm-setup.sh`) is assumed to be already present on any modern LINUX system.
 
-=== KVM access (required for Stage 1 acceleration)
-
-x86_64 runs with KVM hardware virtualisation, which requires your user to be in the `kvm` group:
-
-[source,bash]
-----
-ls -la /dev/kvm                     # verify KVM device is present
-sudo usermod -aG kvm $USER          # add yourself to the kvm group
-# log out and back in (or: newgrp kvm in the current shell)
-----
-
-aarch64 uses TCG software emulation and does not require KVM.
-
-== Stage 1: x86_64 QEMU VM
+== x86_64 QEMU VM
 
 === One-time setup
 
@@ -181,7 +164,7 @@ Checks performed:
 
 Exit code 0 = all checks pass.
 
-== Stage 2: aarch64 QEMU VM
+== aarch64 QEMU VM
 
 Once Stage 1 is clean, repeat on the aarch64 target to catch architecture-specific issues
 (binary wheel availability for `aarch64-musllinux`, etc.).
@@ -225,43 +208,4 @@ To recreate the pristine snapshot:
 rm tests/openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img
 rm tests/openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.pristine.img
 ./vm-setup.sh aarch64
-----
-
-== Stage 3: OpenWrt One (physical hardware)
-
-The OpenWrt One already runs OpenWrt 25.12.3 (r32912-6639b15f62) — no firmware flash needed.
-
-[source,bash]
-----
-ssh root@<router-ip> 'sh -s' < ../ha_install.sh
-----
-
-NOTE: OpenWrt only provides `ash`; `bash` is not available on the device.
-Use `sh -s` (POSIX sh, satisfied by ash), not `bash -s`.
-
-== Iteration workflow
-
-The recommended workflow for fixing issues in `ha_install.sh`:
-
-[source,bash]
-----
-# 1. edit ha_install.sh on the host
-# 2. run the full test cycle (restores pristine, installs, qualifies, stops)
-./vm-test.sh x86_64
-# 3. repeat from 1 until all checks pass
-# 4. repeat on aarch64
-./vm-test.sh aarch64
-----
-
-To inspect the VM mid-run, use single-step mode:
-
-[source,bash]
-----
-./vm-test.sh --step setup x86_64   # restore pristine
-./vm-test.sh --step start x86_64   # start VM
-# ... connect manually, inspect, iterate ...
-ssh -o StrictHostKeyChecking=no root@localhost -p 2222
-./vm-test.sh --step run x86_64     # run install
-./vm-test.sh --step qualify x86_64 # qualify
-./vm-test.sh --step stop x86_64    # stop
 ----
