@@ -96,6 +96,23 @@ external disk is absent (HA will not start, but routing and networking are unaff
 
 Now proceed with the normal installation below.
 
+### Temporary build directory
+
+During installation `ha_install.sh` uses a temporary directory (`/root/tmp-ha` by default) for
+downloading and unpacking packages. On devices with limited internal flash, this can fill the
+primary disk. Point it at an external mount instead:
+
+```sh
+# via environment variable
+HA_TMP_DIR=/mnt/external/ha-tmp sh ha_install.sh
+
+# via command-line flag
+sh ha_install.sh --tmp-dir /mnt/external/ha-tmp
+```
+
+The flag takes precedence over the environment variable; the environment variable takes precedence
+over the default. Run `sh ha_install.sh --help` to see all options.
+
 
 ## Feature support
 
