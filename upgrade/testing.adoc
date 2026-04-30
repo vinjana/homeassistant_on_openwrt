@@ -1,0 +1,183 @@
+= Testing the Home Assistant OpenWrt Migration
+:toc:
+:toclevels: 2
+:sectnums:
+:source-highlighter: rouge
+
+== Overview
+
+This directory contains scripts for testing the `ha_install.sh` migration to OpenWrt 25.12.3.
+The goal is *operational qualification*, not functional testing of Home Assistant itself:
+we verify that the install script completes, that all Python native libraries load correctly,
+and that Home Assistant starts and answers on port 8123.
+
+Testing is staged from cheapest to closest-to-reality:
+
+[cols="1,2,2",options="header"]
+|===
+|Stage |Environment |What it catches
+|1 |x86_64 QEMU VM (KVM) |Package manager, Python 3.13 compat, pure-Python deps, fast iteration
+|2 |aarch64 QEMU VM (TCG emulation) |Binary wheel availability for `aarch64-musllinux`, arch-specific feed packages
+|3 |OpenWrt One (physical) |Final real-hardware qualification
+|===
+
+== Prerequisites
+
+.Host packages required
+[source,bash]
+----
+sudo apt install qemu-system-x86 qemu-system-arm qemu-utils openssh-client wget
+----
+
+KVM access (required for Stage 1 acceleration):
+[source,bash]
+----
+# verify KVM is available
+ls -la /dev/kvm
+# if permission denied, add your user to the kvm group:
+sudo usermod -aG kvm $USER   # then log out and back in
+----
+
+== Stage 1: x86_64 QEMU VM
+
+=== One-time setup
+
+[source,bash]
+----
+cd upgrade/
+./vm-setup.sh
+----
+
+This script requires no `sudo`. All operations work on regular files in userspace:
+
+. Downloads the OpenWrt 25.12.3 x86_64 combined ext4 image (skips if already present).
+. Extends the image file to 2 GB with `qemu-img resize`.
+. Expands partition 2 using `parted` on the image file (no block device needed).
+. Expands the ext4 filesystem using `resize2fs -o <offset>` (byte-offset mode, no loop device needed).
+. Patches `/etc/config/network` to use DHCP instead of the default static 192.168.1.1,
+  using `debugfs` on an extracted copy of the partition (no mount needed),
+  so that QEMU's user-mode networking can reach the VM via the SSH port-forward.
+
+The script is idempotent — safe to re-run.
+
+=== Running the VM
+
+[source,bash]
+----
+./vm-start.sh          # boots VM, waits for SSH on port 2222
+./vm-stop.sh           # shuts down the VM
+----
+
+Connect manually:
+[source,bash]
+----
+ssh -o StrictHostKeyChecking=no root@localhost -p 2222
+----
+
+=== Installing Home Assistant
+
+[source,bash]
+----
+./vm-run.sh            # runs ../ha_install.sh on the VM via SSH pipe
+# or supply a different script:
+./vm-run.sh /path/to/modified_ha_install.sh
+----
+
+The script streams output directly to your terminal.
+On failure, fix `ha_install.sh`, stop and restart the VM (to get a clean state), then re-run.
+
+=== Resetting to a clean state
+
+[source,bash]
+----
+./vm-stop.sh
+./vm-setup.sh          # re-runs idempotently; image already patched, so fast
+./vm-start.sh
+----
+
+If you need a truly fresh image (e.g. to test from scratch after a failed partial install),
+delete the image and re-run setup:
+[source,bash]
+----
+./vm-stop.sh
+rm upgrade/openwrt-25.12.3-x86-64-generic-ext4-combined.img
+./vm-setup.sh
+----
+
+=== Operational qualification
+
+[source,bash]
+----
+./vm-qualify.sh
+----
+
+Checks performed:
+
+* Native library imports: `ciso8601`, `cryptography`, `PIL`, `bcrypt`, `aiohttp`, `uv`, `yaml`, `sqlalchemy`, `zeroconf`
+* Home Assistant package import and version string
+* HA service starts via `/etc/init.d/homeassistant start`
+* Port 8123 responds with a valid API response (up to 30 s wait)
+* hass-configurator answers on port 3218
+* HA init script is enabled (persists across reboot)
+
+Exit code 0 = all checks pass.
+
+== Stage 2: aarch64 QEMU VM
+
+Once Stage 1 is clean, repeat on the aarch64 target to catch architecture-specific issues
+(binary wheel availability for `aarch64-musllinux`, etc.).
+
+NOTE: There is currently no `aarch64-vm-setup.sh`. This stage is manual until Stage 1 is stable.
+
+[source,bash]
+----
+wget https://downloads.openwrt.org/releases/25.12.3/targets/armsr/armv8/openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img.gz
+gunzip openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img.gz
+qemu-img resize -f raw openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img 2G
+# partition resize + network patch: same steps as vm-setup.sh, adapted for armv8
+
+qemu-system-aarch64 \
+  -M virt -cpu cortex-a57 \
+  -m 1024 -smp 2 \
+  -drive file=openwrt-25.12.3-armsr-armv8-generic-ext4-combined.img,if=virtio,format=raw \
+  -nic user,model=virtio,hostfwd=tcp::2223-:22 \
+  -nographic
+
+ssh -o StrictHostKeyChecking=no root@localhost -p 2223 'bash -s' < ../ha_install.sh
+----
+
+Run `vm-qualify.sh` with `SSH_PORT=2223` (edit or pass as env var) for the same checks.
+
+== Stage 3: OpenWrt One (physical hardware)
+
+The OpenWrt One already runs OpenWrt 25.12.3 (r32912-6639b15f62) — no firmware flash needed.
+
+[source,bash]
+----
+ssh root@<router-ip> 'bash -s' < ../ha_install.sh
+----
+
+Qualification:
+[source,bash]
+----
+SSH_PORT=22 SSH_HOST=<router-ip> ./vm-qualify.sh
+----
+
+NOTE: `vm-qualify.sh` currently hardcodes `localhost:2222`. Once Stage 2 is stable,
+the script will be parameterised for SSH host and port.
+
+== Iteration workflow
+
+The recommended workflow for fixing issues in `ha_install.sh`:
+
+[source,bash]
+----
+# 1. edit ha_install.sh on the host
+# 2. reset the VM to a clean state
+./vm-stop.sh && ./vm-start.sh
+# 3. run the install
+./vm-run.sh
+# 4. if it completes, run qualification
+./vm-qualify.sh
+# 5. repeat from 1 until all checks pass
+----
