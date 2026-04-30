@@ -143,6 +143,7 @@ check_free_space "$STORAGE_TMP" 524288  # ~256 MB final + headroom for zip downl
 rm -rf "$STORAGE_TMP"
 mkdir -p "$STORAGE_TMP"
 export TMPDIR="$STORAGE_TMP"
+export UV_LINK_MODE=copy
 
 HOMEASSISTANT_VERSION=$(get_ha_version)
 
@@ -275,14 +276,13 @@ $VENV_PIP install --no-cache-dir wheel "packaging>=24.0"
 # - attrs 25.4.0: feed ships 23.1.0, too old for HA 2026.2
 # - aiodns 4.0.0: not in feed; triggers pip upgrade of pycares 4.10.0 → 5.0.1
 #   (aiodns 4.0.0 requires pycares>=5.0.0; musl wheels available for both archs)
-# - uv: hard HA runtime dependency (homeassistant/util/package.py), not in the feed
+# - uv: installed system-wide by `pip3 install uv` above; inherited via --system-site-packages
 $VENV_PIP install --no-cache-dir \
   "aiohttp==3.13.3" \
   "aiohttp-cors==0.8.1" \
   "ciso8601==2.3.3" \
   "attrs==25.4.0" \
-  "aiodns==4.0.0" \
-  "uv==0.9.26"
+  "aiodns==4.0.0"
 $VENV_PIP freeze > "$STORAGE_TMP/freeze.txt"
 grep -E 'aiohttp|async-timeout|crypto|YAML|ciso8601|pycares|cffi|pycparser' "$STORAGE_TMP/freeze.txt" \
   > "$STORAGE_TMP/owrt_constraints.txt"
