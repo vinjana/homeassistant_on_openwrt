@@ -271,7 +271,7 @@ $(version voluptuous)
 $(version voluptuous-serialize)
 # $(version sqlalchemy)  # recorder requirement
 $(version ulid-transform)  # utils
-$(version packaging)
+packaging>=24.0  # wheel 0.47.0 requires >=24.0; HA's pin of 23.1 conflicts
 $(version psutil-home-assistant)
 $(version async-interrupt)
 $(version aiohttp-fast-zlib)  # pure-Python zlib speedup, required by http component
@@ -379,9 +379,12 @@ cd "$STORAGE_TMP"
 rm -rf "home-assistant-frontend.zip" "home-assistant-frontend-$HOMEASSISTANT_FRONTEND_VERSION"
 rm -rf "$SITE_PACKAGES/hass_frontend"
 rm -rf "$SITE_PACKAGES"/home_assistant_frontend-*
-wget https://pypi.org/simple/home-assistant-frontend/ -O - | grep "home_assistant_frontend-$HOMEASSISTANT_FRONTEND_VERSION-py3" | cut -d '"' -f2 | xargs wget -O /tmp/home-assistant-frontend.zip
-unzip -qqo /tmp/home-assistant-frontend.zip -d home-assistant-frontend
-rm -rf /tmp/home-assistant-frontend.zip
+wget https://pypi.org/simple/home-assistant-frontend/ -O - \
+  | grep "home_assistant_frontend-$HOMEASSISTANT_FRONTEND_VERSION-py3" \
+  | cut -d '"' -f2 \
+  | xargs wget -O "$STORAGE_TMP/home-assistant-frontend.zip"
+unzip -qqo "$STORAGE_TMP/home-assistant-frontend.zip" -d home-assistant-frontend
+rm -f "$STORAGE_TMP/home-assistant-frontend.zip"
 cd home-assistant-frontend
 find ./hass_frontend/frontend_es5 -name '*.js' -exec rm -rf {} \;
 find ./hass_frontend/frontend_es5 -name '*.map' -exec rm -rf {} \;
