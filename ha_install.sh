@@ -51,6 +51,19 @@ mlpatch()
   tr '\n' '\x01' < "$f" | sed "$@" | tr '\x01' '\n' > "${f}.new" && mv "${f}.new" "$f"
 }
 
+check_free_space()
+{
+  local path="$1" min_kb="$2"
+  local free_kb
+  mkdir -p "$path"
+  free_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
+  if [ "$free_kb" -lt "$min_kb" ]; then
+    printf "ERROR: Not enough free space at %s: %d MB available, %d MB required.\n" \
+      "$path" "$((free_kb / 1024))" "$((min_kb / 1024))" >&2
+    exit 1
+  fi
+}
+
 set -eu
 
 HOMEASSISTANT_MAJOR_VERSION="2026.2"
@@ -121,6 +134,7 @@ if pgrep -a -f "usr/bin/hass"; then
   exit 1;
 fi
 
+check_free_space "$STORAGE_TMP" 524288  # ~256 MB final + headroom for zip download
 rm -rf "$STORAGE_TMP"
 
 echo "Install base requirements from feed..."
@@ -202,6 +216,8 @@ if [ "$BROKEN_NUMPY" ]; then
 else
   apk add python3-numpy 2>/dev/null || true
 fi
+# Repair any apk packages that a previous failed install may have corrupted.
+apk fix 2>/dev/null || true
 
 cd /tmp/
 
@@ -227,7 +243,8 @@ pip3 install --no-cache-dir \
   "aiodns==4.0.0" \
   "uv==0.9.26"
 pip3 freeze > /tmp/freeze.txt
-grep -E 'aiohttp|async-timeout|crypto|YAML|ciso8601|pycares|cffi|pycparser' /tmp/freeze.txt > /tmp/owrt_constraints.txt
+grep -E 'aiohttp|async-timeout|crypto|YAML|ciso8601|pycares|cffi|pycparser' /tmp/freeze.txt \
+  > /tmp/owrt_constraints.txt
 
 cat << EOF > /tmp/requirements_nodeps.txt
 $(version aioesphomeapi)
@@ -241,6 +258,7 @@ mkdir -p "$STORAGE_TMP"
 TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir --no-deps -r /tmp/requirements_nodeps.txt
 # Install aioesphomeapi's direct deps that --no-deps skipped
 TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir \
+  "async-interrupt>=1.2.0" \
   "chacha20poly1305-reuseable>=0.10.0" \
   "noiseprotocol>=0.3.1,<1.0" \
   "protobuf>=6,<8" \
@@ -252,7 +270,7 @@ sed -i \
   -e 's/cryptography\(.*\)/cryptography >=36.0.2/' \
   "$SITE_PACKAGES"/aioesphomeapi-*-info/METADATA
 
-cat << EOF > /tmp/requirements.txt
+cat <<EOF > /tmp/requirements.txt
 tzdata>=2021.2.post0  # 2021.6+ requirement
 $(version aiozoneinfo)  # HA timezone util
 $(version annotatedyaml)  # HA YAML util
@@ -306,7 +324,7 @@ hass-configurator==0.6.0
 EOF
 
 if [ "$NEED_ZHA" ]; then
-  cat << EOF >> /tmp/requirements.txt
+  cat <<EOF >> /tmp/requirements.txt
 # zha requirements (zha package pulls in zigpy, bellows, zigpy-zigate, and other backends)
 $(version zha)
 $(version serialx)
@@ -347,15 +365,19 @@ if [ "$NEED_ZHA" ]; then
   sed -i 's/if info.subsystem != "platform"]/]/' "$SITE_PACKAGES/serial/tools/list_ports_linux.py"
 fi
 
-# fix deps
-# shellcheck disable=SC2144
-if [ -f $SITE_PACKAGES/botocore-*-info/METADATA ]; then
-  sed -i 's/urllib3 \(.*\)/urllib3 (>=1.20)/' $SITE_PACKAGES/botocore-*-info/METADATA
-  sed -i 's/botocore \(.*\)/botocore (>=1.12.0)/' $SITE_PACKAGES/boto3-*-info/METADATA
-else
-  sed -i 's/urllib3<1.25,>=1.20/urllib3>=1.20/' $SITE_PACKAGES/botocore-*.egg-info/requires.txt
-  sed -i 's/botocore<1.13.0,>=1.12.135/botocore<1.13.0,>=1.12.0/' $SITE_PACKAGES/boto3-*.egg-info/requires.txt
-fi
+# fix deps — relax version pins; handles both dist-info and egg-info layouts
+for f in "$SITE_PACKAGES"/botocore-*-info/METADATA; do
+  [ -f "$f" ] && sed -i 's/urllib3 \(.*\)/urllib3 (>=1.20)/' "$f"
+done
+for f in "$SITE_PACKAGES"/boto3-*-info/METADATA; do
+  [ -f "$f" ] && sed -i 's/botocore \(.*\)/botocore (>=1.12.0)/' "$f"
+done
+for f in "$SITE_PACKAGES"/botocore-*.egg-info/requires.txt; do
+  [ -f "$f" ] && sed -i 's/urllib3<1.25,>=1.20/urllib3>=1.20/' "$f"
+done
+for f in "$SITE_PACKAGES"/boto3-*.egg-info/requires.txt; do
+  [ -f "$f" ] && sed -i 's/botocore<1.13.0,>=1.12.135/botocore<1.13.0,>=1.12.0/' "$f"
+done
 rm -rf $SITE_PACKAGES/pycountry/locales \
        $SITE_PACKAGES/pycountry/tests
 
@@ -418,7 +440,7 @@ cd /tmp
 rm -rf homeassistant.tar.gz "homeassistant-$HOMEASSISTANT_VERSION" .cache pip-*
 wget "https://pypi.python.org/packages/source/h/homeassistant/homeassistant-$HOMEASSISTANT_VERSION.tar.gz" -O homeassistant.tar.gz
 
-cat << EOF > /tmp/ha_components.txt
+cat <<EOF > /tmp/ha_components.txt
 __init__.py
 air_quality
 alarm_control_panel
