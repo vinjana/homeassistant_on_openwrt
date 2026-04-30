@@ -126,7 +126,9 @@ rm -rf "$STORAGE_TMP"
 echo "Install base requirements from feed..."
 apk update
 
-apk add python3-base
+apk add \
+  python3-base \
+  python3-pynacl
 
 PYTHON_VERSION=$(get_python_version)
 echo "Detected Python $PYTHON_VERSION"
@@ -134,10 +136,6 @@ SITE_PACKAGES="/usr/lib/python$PYTHON_VERSION/site-packages"
 LUMI_GATEWAY=$(is_lumi_gateway)
 GTW360_GATEWAY=$(is_gtw360)
 NEED_ZHA="$LUMI_GATEWAY$GTW360_GATEWAY"
-
-apk add \
-  python3-base \
-  python3-pynacl
 
 apk add \
   patch \
@@ -213,7 +211,7 @@ rm -rf "$SITE_PACKAGES/botocore/data"
 find "$SITE_PACKAGES/numpy" -iname tests -print0 | xargs -0 rm -rf
 
 echo "Install base requirements from PyPI..."
-pip3 install --no-cache-dir wheel
+pip3 install --no-cache-dir wheel "packaging>=24.0"
 # Packages absent from the OpenWrt 25.12 feed or behind the required version;
 # installed before pip freeze so they appear in owrt_constraints.txt.
 # - aiohttp/aiohttp-cors/ciso8601: not in the 25.12 feed
@@ -241,10 +239,18 @@ EOF
 mkdir -p "$STORAGE_TMP"
 
 TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir --no-deps -r /tmp/requirements_nodeps.txt
+# Install aioesphomeapi's direct deps that --no-deps skipped
+TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir \
+  "chacha20poly1305-reuseable>=0.10.0" \
+  "noiseprotocol>=0.3.1,<1.0" \
+  "protobuf>=6,<8" \
+  "tzlocal>=5.0,<6"
 # add zeroconf
 grep 'zeroconf' /tmp/requirements_nodeps.txt >> /tmp/owrt_constraints.txt
-# fix deps
-sed -i -e 's/cryptography\(.*\)/cryptography >=36.0.2/' -e 's/chacha20poly1305-reuseable\(.*\)/chacha20poly1305-reuseable >=0.10.0/' $SITE_PACKAGES/aioesphomeapi-*-info/METADATA
+# fix deps — relax cryptography version pin (apk ships a different minor than aioesphomeapi expects)
+sed -i \
+  -e 's/cryptography\(.*\)/cryptography >=36.0.2/' \
+  "$SITE_PACKAGES"/aioesphomeapi-*-info/METADATA
 
 cat << EOF > /tmp/requirements.txt
 tzdata>=2021.2.post0  # 2021.6+ requirement

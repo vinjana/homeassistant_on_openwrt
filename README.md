@@ -1,16 +1,17 @@
 # Homeassistant on OpenWrt
 
-This repo provides tools to install the latest version of Home Assistant. (2024.3.x)
-on a system with OpenWrt 23.05+ installed. It provides the reduced version of HA with only minimal list of components 
-included. Additionally, it keeps MQTT, ESPHome, and ZHA components as they are 
-widely used with smart home solutions.
+This repo provides tools to install the Home Assistant on a system with OpenWrt installed. 
+It provides the reduced version of HA with only minimal list of components included.
+Additionally, it keeps MQTT, ESPHome, and ZHA components as they are widely used with smart home solutions.
+
+Only specific HomeAssistant/OpenWRT combinations are supported. Please refer to the branches which are named by the OpenWRT version, to see which HA version is supported with which OpenWRT version.
 
 It is distributed with a shell script that downloads and installs everything that required for a clean start.
 
 ### Requirements:
 - 256 MB storage space
 - 256 MB RAM
-- OpenWrt 23.05.0 or newer installed
+- OpenWrt 25.12.3 or newer installed
 
 ## Generic installation
 Then, download the installer and run it. For instance:
@@ -32,7 +33,7 @@ HA could install dependencies and fails on finding them after installation.
 In this case restarting HA could work.
 
 Other components are not tested and may require additional changed in 
-requirement versions or python libraries.
+requirement versions or Python libraries.
 
 ## Installing on external storage
 
@@ -94,7 +95,6 @@ Make both mounts persistent across reboots by adding them to `/etc/fstab`:
 The `nofail` option on the bind mount ensures the router still boots cleanly if the
 external disk is absent (HA will not start, but routing and networking are unaffected).
 
-Now proceed with the normal installation below.
 
 ### Temporary build directory
 
@@ -103,6 +103,11 @@ downloading and unpacking packages. On devices with limited internal flash, this
 primary disk. Point it at an external mount instead:
 
 ```sh
+ha_version=25.12
+wget https://raw.githubusercontent.com/openlumi/homeassistant_on_openwrt/$ha_version/ha_install.sh -O ha_install.sh
+chmod +x ha_install.sh
+
+
 # via environment variable
 HA_TMP_DIR=/mnt/external/ha-tmp sh ha_install.sh
 

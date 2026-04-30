@@ -33,5 +33,7 @@ if ! check_ssh; then
     exit 1
 fi
 
+wait_for_internet
+
 echo "Running $(basename "$INSTALL_SCRIPT") on $ARCH VM..."
 ssh_run 'sh -s' < "$INSTALL_SCRIPT"

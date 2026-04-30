@@ -114,6 +114,29 @@ wait_for_ssh() {
 }
 
 # ---------------------------------------------------------------------------
+# wait_for_internet [MAX_TRIES [INTERVAL_S]]
+#   Polls until the VM can reach pypi.org, or times out.
+#   Default: 24 tries × 5 s = 120 s.
+#   Needed on aarch64/TCG: the firewall finishes applying uci-defaults rules
+#   after SSH is already up, so outbound connections fail briefly at boot.
+# ---------------------------------------------------------------------------
+wait_for_internet() {
+    local max_tries="${1:-24}" interval="${2:-5}"
+    echo "Waiting for VM internet connectivity (up to $((max_tries * interval)) s)..."
+    for _ in $(seq 1 "$max_tries"); do
+        if "${SSH_ARGS[@]}" 'wget -q -O /dev/null https://pypi.org/' 2>/dev/null; then
+            echo "Internet is ready."
+            return 0
+        fi
+        printf "."
+        sleep "$interval"
+    done
+    echo ""
+    echo "ERROR: VM did not reach the internet within $((max_tries * interval)) seconds." >&2
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # check_ssh
 #   Returns 0 if the VM is reachable, 1 otherwise.  No output.
 # ---------------------------------------------------------------------------
