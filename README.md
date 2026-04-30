@@ -230,4 +230,4 @@ versions at all.
 ## Code testing
 
 The code has been tested with OpenWRT VMs on x86_64 and aarch64 architectures.
-Reproducible tests are described in [tests/README.md](tests/README.md).
+Reproducible tests are described in [tests/README.adoc](tests/README.adoc).
