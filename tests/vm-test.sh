@@ -2,9 +2,10 @@
 # End-to-end VM test runner.  Orchestrates all test steps in order, or runs a
 # single named step when --step is given.
 #
-# Usage: ./vm-test.sh [--step STEP] [arch] [install-script]
+# Usage: ./vm-test.sh [--step STEP] [arch] [install-script] [venv-dir]
 #   arch            x86_64 (default) or aarch64
 #   install-script  path to install script (default: ../ha_install.sh)
+#   venv-dir        venv path used by the install script (default: /opt/homeassistant)
 #   --step STEP     run only one step: setup | start | run | qualify | stop | all
 #
 # Full run order: setup → start → run → qualify → stop
@@ -33,6 +34,7 @@ if [[ "${1:-}" == "x86_64" || "${1:-}" == "aarch64" ]]; then
 fi
 
 INSTALL_SCRIPT="${1:-$SCRIPT_DIR/../ha_install.sh}"
+VENV_DIR="${2:-/opt/homeassistant}"
 
 arch_config "$ARCH"
 
@@ -51,7 +53,7 @@ do_run() {
 }
 
 do_qualify() {
-    "$SCRIPT_DIR/vm-qualify.sh" "$ARCH"
+    "$SCRIPT_DIR/vm-qualify.sh" "$ARCH" "$VENV_DIR"
 }
 
 do_stop() {

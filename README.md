@@ -37,14 +37,20 @@ requirement versions or Python libraries.
 
 ## Installing on external storage
 
-Home Assistant requires roughly 250 MB of storage for its Python packages.
-If your router's internal flash is too small, mount an external disk and bind-mount
-it over the Python site-packages directory **before** running `ha_install.sh`.
+Home Assistant requires roughly 250 MB of storage for its Python packages, plus a growing
+SQLite database.
+If your router's internal flash is too small, put both on an external disk using the
+`--venv-dir` and `--config-dir` options.
 
-This approach keeps the router's core function (networking, firewall) on internal flash
-and only the HA packages on the external disk.
-If the external disk fails, the router keeps routing and HA simply fails to start —
-recovering is a matter of attaching a new disk and re-running the install script.
+The install script creates an isolated Python virtual environment (venv) for HA.
+The venv inherits the system Python packages installed by `apk` (cryptography, pillow, etc.)
+and installs all pip-only packages into its own directory.
+This keeps HA isolated from the rest of the system Python and makes the install fully
+relocatable: point `--venv-dir` at any path and the venv lands there.
+
+If the external disk fails to mount at boot, the router keeps routing and HA simply does
+not start — the init script detects the missing venv and exits cleanly.
+Recovering is a matter of attaching a new disk and re-running the install script.
 
 ### Prerequisites
 
@@ -63,60 +69,57 @@ Format the disk (skip if already formatted):
 mkfs.ext4 /dev/sda1
 ```
 
-Create mount points and mount the disk:
+Create the mount point and mount the disk:
 
 ```sh
 mkdir -p /mnt/external
 mount /dev/sda1 /mnt/external
-mkdir -p /mnt/external/python-packages
 ```
 
-Determine your Python version:
-
-```sh
-python3 --version    # e.g. Python 3.13.x
-```
-
-Bind-mount the site-packages directory so pip writes to the external disk:
-
-```sh
-mount --bind /mnt/external/python-packages /usr/lib/python3.13/site-packages
-```
-
-Replace `3.13` with the actual major.minor version if different.
-
-Make both mounts persistent across reboots by adding them to `/etc/fstab`:
+Make the mount persistent by adding it to `/etc/fstab`:
 
 ```
-/dev/sda1                          /mnt/external                ext4  defaults          0 0
-/mnt/external/python-packages      /usr/lib/python3.13/site-packages  none  bind,nofail  0 0
+/dev/sda1   /mnt/external   ext4   defaults,nofail   0 0
 ```
 
-The `nofail` option on the bind mount ensures the router still boots cleanly if the
-external disk is absent (HA will not start, but routing and networking are unaffected).
+The `nofail` option ensures the router still boots cleanly if the disk is absent.
 
+### Install HA onto the external disk
 
-### Temporary build directory
-
-During installation `ha_install.sh` uses a temporary directory (`/root/tmp-ha` by default) for
-downloading and unpacking packages. On devices with limited internal flash, this can fill the
-primary disk. Point it at an external mount instead:
+Pass `--venv-dir` and `--config-dir` to the install script:
 
 ```sh
 ha_version=25.12
 wget https://raw.githubusercontent.com/openlumi/homeassistant_on_openwrt/$ha_version/ha_install.sh -O ha_install.sh
 chmod +x ha_install.sh
-
-
-# via environment variable
-HA_TMP_DIR=/mnt/external/ha-tmp sh ha_install.sh
-
-# via command-line flag
-sh ha_install.sh --tmp-dir /mnt/external/ha-tmp
+sh ha_install.sh \
+  --venv-dir /mnt/external/homeassistant \
+  --config-dir /mnt/external/ha-config
 ```
 
-The flag takes precedence over the environment variable; the environment variable takes precedence
-over the default. Run `sh ha_install.sh --help` to see all options.
+| Option | Default | What moves to the external disk |
+|---|---|---|
+| `--venv-dir` | `/opt/homeassistant` | Python venv (~250 MB of packages) |
+| `--config-dir` | `/etc/homeassistant` | Config files and the SQLite database |
+
+Both options can also be set via environment variables (`HA_VENV_DIR`, `HA_CONFIG_DIR`).
+Run `sh ha_install.sh --help` to see all options.
+
+### Temporary build directory
+
+During installation `ha_install.sh` uses a temporary directory (`/root/tmp-ha` by default) for
+downloading and unpacking packages. On devices with limited internal flash, this can fill the
+primary disk. Point it at the external mount instead:
+
+```sh
+sh ha_install.sh \
+  --tmp-dir   /mnt/external/ha-tmp \
+  --venv-dir  /mnt/external/homeassistant \
+  --config-dir /mnt/external/ha-config
+```
+
+The flag takes precedence over the environment variable (`HA_TMP_DIR`); the environment
+variable takes precedence over the default.
 
 
 ## Feature support

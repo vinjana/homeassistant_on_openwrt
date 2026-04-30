@@ -18,7 +18,7 @@ get_python_version()
 get_version()
 {
   local pkg="$1"
-  grep -i -m 1 "${pkg}[<=>]=" /tmp/ha_requirements.txt | sed 's/.*[<=>]=\(.*\)/\1/g'
+  grep -i -m 1 "${pkg}[<=>]=" "$STORAGE_TMP/ha_requirements.txt" | sed 's/.*[<=>]=\(.*\)/\1/g'
 }
 
 version()
@@ -53,7 +53,8 @@ mlpatch()
 
 check_free_space()
 {
-  local path="$1" min_kb="$2"
+  local path="$1"
+  local min_kb="$2"
   local free_kb
   mkdir -p "$path"
   free_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
@@ -72,8 +73,18 @@ export PIP_DEFAULT_TIMEOUT=100
 # May be set externally to skip numpy on broken platforms (e.g. soft-float MIPS).
 BROKEN_NUMPY="${BROKEN_NUMPY:-}"
 
-# /tmp is RAM-backed and too small; default to flash. Override via HA_TMP_DIR or --tmp-dir.
+# All temp files go here; exported as TMPDIR so pip and subprocesses use it too.
+# Default is flash-backed /root/tmp-ha; override via HA_TMP_DIR or --tmp-dir.
 STORAGE_TMP="${HA_TMP_DIR:-/root/tmp-ha}"
+
+# Python venv for HA; override via HA_VENV_DIR or --venv-dir.
+# Point at an external mount to keep HA packages off the internal flash.
+VENV="${HA_VENV_DIR:-/opt/homeassistant}"
+
+# HA config/data directory; override via HA_CONFIG_DIR or --config-dir.
+# The SQLite database grows over time — point at an external mount to keep
+# it off internal flash (e.g. /mnt/external/homeassistant).
+HA_CONFIG="${HA_CONFIG_DIR:-/etc/homeassistant}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -85,13 +96,35 @@ while [ $# -gt 0 ]; do
       STORAGE_TMP="${1#*=}"
       shift
       ;;
+    --venv-dir)
+      VENV="$2"
+      shift 2
+      ;;
+    --venv-dir=*)
+      VENV="${1#*=}"
+      shift
+      ;;
+    --config-dir)
+      HA_CONFIG="$2"
+      shift 2
+      ;;
+    --config-dir=*)
+      HA_CONFIG="${1#*=}"
+      shift
+      ;;
     --help|-h)
-      echo "Usage: $0 [--tmp-dir <path>]"
+      echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>]"
       echo ""
       echo "Options:"
-      echo "  --tmp-dir <path>   Temporary build directory (default: /root/tmp-ha)"
-      echo "                     Can also be set via the HA_TMP_DIR environment variable."
-      echo "                     Use a path on an external mount to avoid filling the primary disk."
+      echo "  --tmp-dir <path>    Temporary build directory (default: /root/tmp-ha)"
+      echo "                      Can also be set via the HA_TMP_DIR environment variable."
+      echo "                      Use a path on an external mount to avoid filling the primary disk."
+      echo "  --venv-dir <path>   Python virtual environment directory (default: /opt/homeassistant)"
+      echo "                      Can also be set via the HA_VENV_DIR environment variable."
+      echo "                      Point at an external mount to keep HA packages off internal flash."
+      echo "  --config-dir <path> HA configuration and data directory (default: /etc/homeassistant)"
+      echo "                      Can also be set via the HA_CONFIG_DIR environment variable."
+      echo "                      Point at an external mount so the SQLite DB does not fill internal flash."
       exit 0
       ;;
     *)
@@ -100,6 +133,16 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if pgrep -a -f "bin/hass"; then
+  echo "Stop running process of Home Assistant (and HASS Configurator) to free RAM for installation";
+  exit 1;
+fi
+
+check_free_space "$STORAGE_TMP" 524288  # ~256 MB final + headroom for zip download
+rm -rf "$STORAGE_TMP"
+mkdir -p "$STORAGE_TMP"
+export TMPDIR="$STORAGE_TMP"
 
 HOMEASSISTANT_VERSION=$(get_ha_version)
 
@@ -123,19 +166,11 @@ wget -q "https://raw.githubusercontent.com/NabuCasa/hass-nabucasa/$(get_version 
   | awk '/^dependencies = \[/{f=1;next} f && /^[[:space:]]*\]/{exit} f' \
   | grep '[>=]=' \
   | sed -E 's/\s*"(.*)",?/\1/'
-) >/tmp/ha_requirements.txt
+) > "$STORAGE_TMP/ha_requirements.txt"
 
 HOMEASSISTANT_FRONTEND_VERSION=$(get_version home-assistant-frontend)
 NABUCASA_VER=$(get_version hass-nabucasa)
 ZIGPY_ZBOSS_VER=1.2.0
-
-if pgrep -a -f "usr/bin/hass"; then
-  echo "Stop running process of Home Assistant (and HASS Configurator) to free RAM for installation";
-  exit 1;
-fi
-
-check_free_space "$STORAGE_TMP" 524288  # ~256 MB final + headroom for zip download
-rm -rf "$STORAGE_TMP"
 
 echo "Install base requirements from feed..."
 apk update
@@ -219,15 +254,21 @@ fi
 # Repair any apk packages that a previous failed install may have corrupted.
 apk fix 2>/dev/null || true
 
-cd /tmp/
+cd "$STORAGE_TMP"
 
-rm -rf /etc/homeassistant/deps/
+rm -rf "$HA_CONFIG/deps/"
 find "$SITE_PACKAGES" | grep -E "/__pycache__$" | xargs rm -rf
 rm -rf "$SITE_PACKAGES/botocore/data"
 find "$SITE_PACKAGES/numpy" -iname tests -print0 | xargs -0 rm -rf
 
+echo "Create Python venv at $VENV (inheriting apk packages)..."
+pip3 install --no-cache-dir uv
+uv venv --system-site-packages --seed "$VENV"
+VENV_SITE_PACKAGES="$VENV/lib/python$PYTHON_VERSION/site-packages"
+VENV_PIP="$VENV/bin/pip"
+
 echo "Install base requirements from PyPI..."
-pip3 install --no-cache-dir wheel "packaging>=24.0"
+$VENV_PIP install --no-cache-dir wheel "packaging>=24.0"
 # Packages absent from the OpenWrt 25.12 feed or behind the required version;
 # installed before pip freeze so they appear in owrt_constraints.txt.
 # - aiohttp/aiohttp-cors/ciso8601: not in the 25.12 feed
@@ -235,42 +276,40 @@ pip3 install --no-cache-dir wheel "packaging>=24.0"
 # - aiodns 4.0.0: not in feed; triggers pip upgrade of pycares 4.10.0 → 5.0.1
 #   (aiodns 4.0.0 requires pycares>=5.0.0; musl wheels available for both archs)
 # - uv: hard HA runtime dependency (homeassistant/util/package.py), not in the feed
-pip3 install --no-cache-dir \
+$VENV_PIP install --no-cache-dir \
   "aiohttp==3.13.3" \
   "aiohttp-cors==0.8.1" \
   "ciso8601==2.3.3" \
   "attrs==25.4.0" \
   "aiodns==4.0.0" \
   "uv==0.9.26"
-pip3 freeze > /tmp/freeze.txt
-grep -E 'aiohttp|async-timeout|crypto|YAML|ciso8601|pycares|cffi|pycparser' /tmp/freeze.txt \
-  > /tmp/owrt_constraints.txt
+$VENV_PIP freeze > "$STORAGE_TMP/freeze.txt"
+grep -E 'aiohttp|async-timeout|crypto|YAML|ciso8601|pycares|cffi|pycparser' "$STORAGE_TMP/freeze.txt" \
+  > "$STORAGE_TMP/owrt_constraints.txt"
 
-cat << EOF > /tmp/requirements_nodeps.txt
+cat << EOF > "$STORAGE_TMP/requirements_nodeps.txt"
 $(version aioesphomeapi)
 $(version esphome-dashboard-api)
 $(version zeroconf)
 $(version PyTurboJPEG)
 EOF
 
-mkdir -p "$STORAGE_TMP"
-
-TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir --no-deps -r /tmp/requirements_nodeps.txt
+$VENV_PIP install --no-cache-dir --no-deps -r "$STORAGE_TMP/requirements_nodeps.txt"
 # Install aioesphomeapi's direct deps that --no-deps skipped
-TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir \
+$VENV_PIP install --no-cache-dir \
   "async-interrupt>=1.2.0" \
   "chacha20poly1305-reuseable>=0.10.0" \
   "noiseprotocol>=0.3.1,<1.0" \
   "protobuf>=6,<8" \
   "tzlocal>=5.0,<6"
 # add zeroconf
-grep 'zeroconf' /tmp/requirements_nodeps.txt >> /tmp/owrt_constraints.txt
+grep 'zeroconf' "$STORAGE_TMP/requirements_nodeps.txt" >> "$STORAGE_TMP/owrt_constraints.txt"
 # fix deps — relax cryptography version pin (apk ships a different minor than aioesphomeapi expects)
 sed -i \
   -e 's/cryptography\(.*\)/cryptography >=36.0.2/' \
-  "$SITE_PACKAGES"/aioesphomeapi-*-info/METADATA
+  "$VENV_SITE_PACKAGES"/aioesphomeapi-*-info/METADATA
 
-cat <<EOF > /tmp/requirements.txt
+cat <<EOF > "$STORAGE_TMP/requirements.txt"
 tzdata>=2021.2.post0  # 2021.6+ requirement
 $(version aiozoneinfo)  # HA timezone util
 $(version annotatedyaml)  # HA YAML util
@@ -324,7 +363,7 @@ hass-configurator==0.6.0
 EOF
 
 if [ "$NEED_ZHA" ]; then
-  cat <<EOF >> /tmp/requirements.txt
+  cat <<EOF >> "$STORAGE_TMP/requirements.txt"
 # zha requirements (zha package pulls in zigpy, bellows, zigpy-zigate, and other backends)
 $(version zha)
 $(version serialx)
@@ -334,8 +373,8 @@ fi
 
 # netifaces: C extension, no musl wheel. Install netifaces2 (has musl wheels) and create a
 # compatibility shim so pip treats netifaces as already installed when building python-miio deps.
-pip3 install --no-cache-dir netifaces2
-SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+$VENV_PIP install --no-cache-dir netifaces2
+SITE="$VENV_SITE_PACKAGES"
 printf 'from netifaces2 import *\n' > "$SITE/netifaces.py"
 DIST="$SITE/netifaces-0.11.0.dist-info"
 mkdir -p "$DIST"
@@ -344,25 +383,25 @@ printf 'Wheel-Version: 1.0\nGenerator: shim\nRoot-Is-Purelib: true\nTag: py3-non
 printf 'netifaces.py,,\nnetifaces-0.11.0.dist-info/METADATA,,\nnetifaces-0.11.0.dist-info/WHEEL,,\nnetifaces-0.11.0.dist-info/INSTALLER,,\nnetifaces-0.11.0.dist-info/RECORD,,\n' > "$DIST/RECORD"
 printf 'pip\n' > "$DIST/INSTALLER"
 
-# TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir -c /tmp/owrt_constraints.txt -r /tmp/requirements.txt
+# pip3 install --no-cache-dir -c "$STORAGE_TMP/owrt_constraints.txt" -r "$STORAGE_TMP/requirements.txt"
 # install one-by-one to avoid memory issues
-sed -E 's/\[.*\]//g' /tmp/requirements.txt >> /tmp/owrt_constraints.txt
+sed -E 's/\[.*\]//g' "$STORAGE_TMP/requirements.txt" >> "$STORAGE_TMP/owrt_constraints.txt"
 while IFS= read -r p; do
   pkg_with_ver=$(echo "$p" | awk '{gsub(/ *#.*/,"");}1')
   if [ "$pkg_with_ver" ]; then
-    TMPDIR="$STORAGE_TMP" pip3 install --no-cache-dir -c /tmp/owrt_constraints.txt "$pkg_with_ver"
+    $VENV_PIP install --no-cache-dir -c "$STORAGE_TMP/owrt_constraints.txt" "$pkg_with_ver"
   fi
-done < /tmp/requirements.txt
+done < "$STORAGE_TMP/requirements.txt"
 
 if [ "$GTW360_GATEWAY" ]; then
-  pip3 install --no-deps "zigpy-zboss==$ZIGPY_ZBOSS_VER"
-  sed -i -E 's/Requires-.*(jsonschema|coloredlogs)//g' $SITE_PACKAGES/zigpy_zboss-*-info/METADATA
+  $VENV_PIP install --no-deps "zigpy-zboss==$ZIGPY_ZBOSS_VER"
+  sed -i -E 's/Requires-.*(jsonschema|coloredlogs)//g' $VENV_SITE_PACKAGES/zigpy_zboss-*-info/METADATA
 fi
 
 if [ "$NEED_ZHA" ]; then
   # show internal serial ports for Xiaomi Gateway
-  sed -i 's/ttyXRUSB\*/ttymxc[1-9]/' "$SITE_PACKAGES/serial/tools/list_ports_linux.py"
-  sed -i 's/if info.subsystem != "platform"]/]/' "$SITE_PACKAGES/serial/tools/list_ports_linux.py"
+  sed -i 's/ttyXRUSB\*/ttymxc[1-9]/' "$VENV_SITE_PACKAGES/serial/tools/list_ports_linux.py"
+  sed -i 's/if info.subsystem != "platform"]/]/' "$VENV_SITE_PACKAGES/serial/tools/list_ports_linux.py"
 fi
 
 # fix deps — relax version pins; handles both dist-info and egg-info layouts
@@ -378,8 +417,8 @@ done
 for f in "$SITE_PACKAGES"/boto3-*.egg-info/requires.txt; do
   [ -f "$f" ] && sed -i 's/botocore<1.13.0,>=1.12.135/botocore<1.13.0,>=1.12.0/' "$f"
 done
-rm -rf $SITE_PACKAGES/pycountry/locales \
-       $SITE_PACKAGES/pycountry/tests
+rm -rf $VENV_SITE_PACKAGES/pycountry/locales \
+       $VENV_SITE_PACKAGES/pycountry/tests
 
 echo "Install hass_nabucasa and ha-frontend..."
 wget "https://github.com/NabuCasa/hass-nabucasa/archive/$NABUCASA_VER.tar.gz" -O - > "hass-nabucasa-$NABUCASA_VER.tar.gz"
@@ -388,19 +427,19 @@ cd "hass-nabucasa-$NABUCASA_VER"
 # strip version pins from whichever build file nabucasa uses
 [ -f setup.py ] && sed -i 's/[<=>]=.*"/"/' setup.py
 [ -f pyproject.toml ] && sed -i 's/[<=>]=.*"/"/' pyproject.toml
-rm -rf $SITE_PACKAGES/hass_nabucasa-*.egg
-pip3 install . --no-cache-dir -c /tmp/owrt_constraints.txt
+rm -rf "$VENV_SITE_PACKAGES"/hass_nabucasa-*.egg
+$VENV_PIP install . --no-cache-dir -c "$STORAGE_TMP/owrt_constraints.txt"
 cd ..
 rm -rf "hass-nabucasa-$NABUCASA_VER.tar.gz" "hass-nabucasa-$NABUCASA_VER"
 
 # cleanup
-find "$SITE_PACKAGES" -iname tests -print0 | xargs -0 rm -rf
+find "$VENV_SITE_PACKAGES" -iname tests -print0 | xargs -0 rm -rf
 
-# tmp might be small for frontend
+# frontend zip is large; download directly to STORAGE_TMP
 cd "$STORAGE_TMP"
 rm -rf "home-assistant-frontend.zip" "home-assistant-frontend-$HOMEASSISTANT_FRONTEND_VERSION"
-rm -rf "$SITE_PACKAGES/hass_frontend"
-rm -rf "$SITE_PACKAGES"/home_assistant_frontend-*
+rm -rf "$VENV_SITE_PACKAGES/hass_frontend"
+rm -rf "$VENV_SITE_PACKAGES"/home_assistant_frontend-*
 wget https://pypi.org/simple/home-assistant-frontend/ -O - \
   | grep "home_assistant_frontend-$HOMEASSISTANT_FRONTEND_VERSION-py3" \
   | cut -d '"' -f2 \
@@ -428,19 +467,19 @@ for subdir in ./hass_frontend/static/translations/*; do
   fi
 done
 
-mv hass_frontend "$SITE_PACKAGES"
-mv "home_assistant_frontend-$HOMEASSISTANT_FRONTEND_VERSION.dist-info" "$SITE_PACKAGES"
+mv hass_frontend "$VENV_SITE_PACKAGES"
+mv "home_assistant_frontend-$HOMEASSISTANT_FRONTEND_VERSION.dist-info" "$VENV_SITE_PACKAGES"
 cd ..
 rm -rf home-assistant-frontend
 
 echo "Install HASS"
-pip3 install --no-cache-dir --upgrade typing-extensions || true
+$VENV_PIP install --no-cache-dir --upgrade typing-extensions || true
 
-cd /tmp
+cd "$STORAGE_TMP"
 rm -rf homeassistant.tar.gz "homeassistant-$HOMEASSISTANT_VERSION" .cache pip-*
 wget "https://pypi.python.org/packages/source/h/homeassistant/homeassistant-$HOMEASSISTANT_VERSION.tar.gz" -O homeassistant.tar.gz
 
-cat <<EOF > /tmp/ha_components.txt
+cat <<EOF > "$STORAGE_TMP/ha_components.txt"
 __init__.py
 air_quality
 alarm_control_panel
@@ -585,26 +624,23 @@ zeroconf
 zone
 EOF
 if [ "$NEED_ZHA" ]; then
-  echo "zha" >> /tmp/ha_components.txt
+  echo "zha" >> "$STORAGE_TMP/ha_components.txt"
 fi
 
-# create fake structure to get full list of components in /tmp/t/
+# create fake structure to get full list of components
 TMPSTRUCT="$STORAGE_TMP/t"
 rm -rf "$TMPSTRUCT"
-cd "$STORAGE_TMP"
-tar -ztf /tmp/homeassistant.tar.gz | grep '/homeassistant/components/' | sed 's/^/t\//' | xargs mkdir -p
-rx=$(sed -e 's/^/^/' -e 's/$/$/' /tmp/ha_components.txt | head -c -1 | tr '\n' '|')
+tar -ztf homeassistant.tar.gz | grep '/homeassistant/components/' | sed 's/^/t\//' | xargs mkdir -p
+rx=$(sed -e 's/^/^/' -e 's/$/$/' "$STORAGE_TMP/ha_components.txt" | head -c -1 | tr '\n' '|')
 for d in "$TMPSTRUCT"/homeassistant-*/homeassistant/components/*/; do
   comp=$(basename "$d")
   echo "$comp" | grep -q -E "$rx" || echo "*\/homeassistant\/components\/$comp"
-done > /tmp/ha_exclude.txt
-rm -rf "$TMPSTRUCT" /tmp/ha_components.txt
-
-cd /tmp
+done > "$STORAGE_TMP/ha_exclude.txt"
+rm -rf "$TMPSTRUCT" "$STORAGE_TMP/ha_components.txt"
 
 # extract without components to reduce space
-tar -zxf homeassistant.tar.gz -X /tmp/ha_exclude.txt
-rm -rf /tmp/ha_exclude.txt
+tar -zxf homeassistant.tar.gz -X "$STORAGE_TMP/ha_exclude.txt"
+rm -rf "$STORAGE_TMP/ha_exclude.txt"
 
 rm -rf homeassistant.tar.gz
 cd "homeassistant-$HOMEASSISTANT_VERSION/homeassistant/"
@@ -782,7 +818,7 @@ find . -type f -exec touch {} +
 # packages already installed by apk: e.g. aiohttp>=3.9.0 → aiohttp>=3.
 sed -i -E 's/(==|>=|~=)([0-9]+)\.[0-9][0-9.a-z]*/>=\2/g' setup.cfg
 
-rm -rf $SITE_PACKAGES/homeassistant*
+rm -rf $VENV_SITE_PACKAGES/homeassistant*
 
 if [ ! -f setup.py ]; then
   awk \
@@ -798,7 +834,7 @@ fi
 HA_BUILD="$STORAGE_TMP/ha-build"
 mkdir -p "$HA_BUILD"
 ln -s "$HA_BUILD" ./build
-TMPDIR="$STORAGE_TMP" pip3 install . --no-cache-dir -c /tmp/owrt_constraints.txt
+$VENV_PIP install . --no-cache-dir -c "$STORAGE_TMP/owrt_constraints.txt"
 cd ../
 rm -rf "homeassistant-$HOMEASSISTANT_VERSION/" "$HA_BUILD" "$STORAGE_TMP"
 
@@ -807,10 +843,10 @@ if [ -z "$IP" ]; then
   IP=$(ip a | grep "inet " | cut -d " " -f6 | tail -1 | cut -d / -f1)
 fi
 
-if [ ! -f '/etc/homeassistant/configuration.yaml' ]; then
-  mkdir -p /etc/homeassistant
-  ln -s /etc/homeassistant /root/.homeassistant
-  cat <<EOF > /etc/homeassistant/configuration.yaml
+if [ ! -f "$HA_CONFIG/configuration.yaml" ]; then
+  mkdir -p "$HA_CONFIG"
+  ln -sf "$HA_CONFIG" /root/.homeassistant
+  cat <<EOF > "$HA_CONFIG/configuration.yaml"
 # Configure a default setup of Home Assistant (frontend, api, etc)
 default_config:
 
@@ -843,10 +879,10 @@ script: !include scripts.yaml
 scene: !include scenes.yaml
 EOF
 
-  touch /etc/homeassistant/groups.yaml
-  touch /etc/homeassistant/automations.yaml
-  touch /etc/homeassistant/scripts.yaml
-  touch /etc/homeassistant/scenes.yaml
+  touch "$HA_CONFIG/groups.yaml"
+  touch "$HA_CONFIG/automations.yaml"
+  touch "$HA_CONFIG/scripts.yaml"
+  touch "$HA_CONFIG/scenes.yaml"
 fi
 
 echo "Create starting script in init.d"
@@ -858,8 +894,11 @@ USE_PROCD=1
 
 start_service()
 {
+    # Guard: venv may live on an external disk that failed to mount.
+    # Return 0 so the boot sequence continues without error.
+    [ -x $VENV/bin/hass ] || { logger -t homeassistant "$VENV/bin/hass not found — external disk not mounted?"; return 0; }
     procd_open_instance
-    procd_set_param command hass --config /etc/homeassistant --log-file /var/log/home-assistant.log --log-rotate-days 3
+    procd_set_param command $VENV/bin/hass --config $HA_CONFIG --log-file /var/log/home-assistant.log --log-rotate-days 3
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_close_instance
@@ -876,8 +915,9 @@ USE_PROCD=1
 
 start_service()
 {
+    [ -x $VENV/bin/hass-configurator ] || { logger -t hass-configurator "$VENV/bin/hass-configurator not found — external disk not mounted?"; return 0; }
     procd_open_instance
-    procd_set_param command hass-configurator -b /etc/homeassistant
+    procd_set_param command $VENV/bin/hass-configurator -b $HA_CONFIG
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_close_instance
@@ -887,3 +927,12 @@ chmod +x /etc/init.d/hass-configurator
 /etc/init.d/hass-configurator enable
 
 echo "Done."
+echo ""
+echo "Home Assistant is installed but not yet running."
+echo "To start now:    /etc/init.d/homeassistant start"
+echo "                 /etc/init.d/hass-configurator start"
+echo "Or simply reboot — both services start automatically on boot."
+echo ""
+echo "Once running, open in your browser:"
+echo "  Home Assistant:    http://$IP:8123"
+echo "  HASS Configurator: http://$IP:3218"

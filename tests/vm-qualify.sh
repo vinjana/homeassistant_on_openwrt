@@ -11,11 +11,13 @@
 set -uo pipefail
 
 ARCH="${1:-x86_64}"
+VENV_DIR="${2:-/opt/homeassistant}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=vm-lib.sh
 source "$SCRIPT_DIR/vm-lib.sh"
 arch_config "$ARCH"
 init_ssh
+VENV_PYTHON="$VENV_DIR/bin/python3"
 PASS=0
 FAIL=0
 
@@ -56,21 +58,25 @@ if ! check_ssh; then
     exit 1
 fi
 
+echo "--- Venv ---"
+check "venv exists"          "test -x $VENV_PYTHON"
+
+echo ""
 echo "--- Python native library imports ---"
-check "ciso8601"             "python3 -c 'import ciso8601'"
-check "cryptography"         "python3 -c 'import cryptography'"
-check "PIL (Pillow)"         "python3 -c 'import PIL'"
-check "bcrypt"               "python3 -c 'import bcrypt'"
-check "aiohttp"              "python3 -c 'import aiohttp'"
-check "uv"                   "python3 -c 'import uv'"
-check "yaml"                 "python3 -c 'import yaml'"
-check "sqlalchemy"           "python3 -c 'import sqlalchemy'"
-check "zeroconf"             "python3 -c 'import zeroconf'"
+check "ciso8601"             "$VENV_PYTHON -c 'import ciso8601'"
+check "cryptography"         "$VENV_PYTHON -c 'import cryptography'"
+check "PIL (Pillow)"         "$VENV_PYTHON -c 'import PIL'"
+check "bcrypt"               "$VENV_PYTHON -c 'import bcrypt'"
+check "aiohttp"              "$VENV_PYTHON -c 'import aiohttp'"
+check "uv"                   "$VENV_PYTHON -c 'import uv'"
+check "yaml"                 "$VENV_PYTHON -c 'import yaml'"
+check "sqlalchemy"           "$VENV_PYTHON -c 'import sqlalchemy'"
+check "zeroconf"             "$VENV_PYTHON -c 'import zeroconf'"
 
 echo ""
 echo "--- Home Assistant package import ---"
-check "homeassistant imports" "python3 -c 'import homeassistant'"
-check_output "HA version"    "python3 -c 'from homeassistant.const import __version__; print(__version__)'" "20"
+check "homeassistant imports" "$VENV_PYTHON -c 'import homeassistant'"
+check_output "HA version"    "$VENV_PYTHON -c 'from homeassistant.const import __version__; print(__version__)'" "20"
 
 echo ""
 echo "--- Home Assistant startup ---"
