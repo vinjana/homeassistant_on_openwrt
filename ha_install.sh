@@ -269,7 +269,7 @@ VENV_SITE_PACKAGES="$VENV/lib/python$PYTHON_VERSION/site-packages"
 VENV_PIP="$VENV/bin/pip"
 
 echo "Install base requirements from PyPI..."
-$VENV_PIP install --no-cache-dir wheel "packaging>=24.0"
+$VENV_PIP install --no-cache-dir wheel "packaging>=24.0" "audioop-lts"
 # Packages absent from the OpenWrt 25.12 feed or behind the required version;
 # installed before pip freeze so they appear in owrt_constraints.txt.
 # - aiohttp/aiohttp-cors/ciso8601: not in the 25.12 feed
@@ -476,6 +476,7 @@ wget "https://pypi.python.org/packages/source/h/homeassistant/homeassistant-$HOM
 
 cat <<EOF > "$STORAGE_TMP/ha_components.txt"
 __init__.py
+ai_task
 air_quality
 alarm_control_panel
 alert
@@ -512,6 +513,7 @@ energy
 esphome
 event
 fan
+file
 file_upload
 frontend
 geo_location
@@ -667,10 +669,21 @@ sed -i 's/PyNaCl==[0-9\.]*/PyNaCl/i' mobile_app/manifest.json
 sed -i 's/defusedxml==[0-9\.]*/defusedxml/i' ssdp/manifest.json
 sed -i 's/netdisco==[0-9\.]*/netdisco/i' ssdp/manifest.json
 sed -i 's/radios==[0-9\.]*/radios/i' radio_browser/manifest.json
-sed -i 's/"webrtc-noise-gain==[0-9\.]*"//i' assist_pipeline/manifest.json
-sed -i 's/"pymicro-vad==[0-9\.]*"//i' assist_pipeline/manifest.json
-# pymicro_vad has no musl wheel; stub the hard import so the module loads
+# Remove C-extension audio packages that have no musl wheels.
+# Use Python to edit manifest.json so the result is always valid JSON
+# (sed element-removal leaves orphan commas that break the parser).
+python3 -c "
+import json, re
+f = 'assist_pipeline/manifest.json'
+with open(f) as fp: m = json.load(fp)
+drop = {'webrtc-noise-gain', 'pymicro-vad', 'pyspeex-noise'}
+m['requirements'] = [r for r in m.get('requirements', [])
+                     if re.split(r'[>=<!]', r)[0].strip().lower() not in drop]
+with open(f, 'w') as fp: json.dump(m, fp, indent=2)
+"
+# pymicro_vad and pyspeex_noise have no musl wheels; stub hard imports so the module loads
 sed -i 's/from pymicro_vad import MicroVad/MicroVad = None  # pymicro_vad unavailable on musl/' assist_pipeline/audio_enhancer.py
+sed -i 's/from pyspeex_noise import AudioProcessor/AudioProcessor = None  # pyspeex_noise unavailable on musl/' assist_pipeline/audio_enhancer.py
 
 # relax async-upnp-client versions
 sed -i 's/async-upnp-client==[0-9\.]*/async-upnp-client/i' yeelight/manifest.json
