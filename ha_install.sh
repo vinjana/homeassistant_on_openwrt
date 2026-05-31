@@ -458,14 +458,9 @@ find ./hass_frontend/static/mdi -name '*.json' -maxdepth 1 -exec rm -rf {} \;
 find ./hass_frontend/static/polyfills -name '*.js' -maxdepth 1 -exec rm -rf {} \;
 find ./hass_frontend/static/polyfills -name '*.map' -maxdepth 1 -exec rm -rf {} \;
 find ./hass_frontend/static/locale-data -name '*.json' -exec rm -rf {} \;
-find ./hass_frontend/static/translations -name '*.json' -exec rm -rf {} \;
 
-# gzip all translations (and that removes unarchived files)
-for subdir in ./hass_frontend/static/translations/*; do
-  if [ -d "$subdir" ]; then
-    gzip -f "$subdir"/*.json || true
-  fi
-done
+# gzip translations in place; the server serves .json.gz with Content-Encoding: gzip
+find ./hass_frontend/static/translations -name '*.json' -exec gzip -f {} \;
 
 mv hass_frontend "$VENV_SITE_PACKAGES"
 mv "home_assistant_frontend-$HOMEASSISTANT_FRONTEND_VERSION.dist-info" "$VENV_SITE_PACKAGES"
@@ -673,6 +668,9 @@ sed -i 's/defusedxml==[0-9\.]*/defusedxml/i' ssdp/manifest.json
 sed -i 's/netdisco==[0-9\.]*/netdisco/i' ssdp/manifest.json
 sed -i 's/radios==[0-9\.]*/radios/i' radio_browser/manifest.json
 sed -i 's/"webrtc-noise-gain==[0-9\.]*"//i' assist_pipeline/manifest.json
+sed -i 's/"pymicro-vad==[0-9\.]*"//i' assist_pipeline/manifest.json
+# pymicro_vad has no musl wheel; stub the hard import so the module loads
+sed -i 's/from pymicro_vad import MicroVad/MicroVad = None  # pymicro_vad unavailable on musl/' assist_pipeline/audio_enhancer.py
 
 # relax async-upnp-client versions
 sed -i 's/async-upnp-client==[0-9\.]*/async-upnp-client/i' yeelight/manifest.json
