@@ -86,6 +86,9 @@ VENV="${HA_VENV_DIR:-/opt/homeassistant}"
 # it off internal flash (e.g. /mnt/external/homeassistant).
 HA_CONFIG="${HA_CONFIG_DIR:-/etc/homeassistant}"
 
+# HA log file path; override via HA_LOG_FILE or --log-file.
+HA_LOG_FILE="${HA_LOG_FILE:-/var/log/home-assistant.log}"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --tmp-dir)
@@ -112,8 +115,16 @@ while [ $# -gt 0 ]; do
       HA_CONFIG="${1#*=}"
       shift
       ;;
+    --log-file)
+      HA_LOG_FILE="$2"
+      shift 2
+      ;;
+    --log-file=*)
+      HA_LOG_FILE="${1#*=}"
+      shift
+      ;;
     --help|-h)
-      echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>]"
+      echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>] [--log-file <path>]"
       echo ""
       echo "Options:"
       echo "  --tmp-dir <path>    Temporary build directory (default: /root/tmp-ha)"
@@ -125,6 +136,8 @@ while [ $# -gt 0 ]; do
       echo "  --config-dir <path> HA configuration and data directory (default: /etc/homeassistant)"
       echo "                      Can also be set via the HA_CONFIG_DIR environment variable."
       echo "                      Point at an external mount so the SQLite DB does not fill internal flash."
+      echo "  --log-file <path>   HA log file path (default: /var/log/home-assistant.log)"
+      echo "                      Can also be set via the HA_LOG_FILE environment variable."
       exit 0
       ;;
     *)
@@ -909,7 +922,7 @@ start_service()
     # Return 0 so the boot sequence continues without error.
     [ -x $VENV/bin/hass ] || { logger -t homeassistant "$VENV/bin/hass not found — external disk not mounted?"; return 0; }
     procd_open_instance
-    procd_set_param command $VENV/bin/hass --config $HA_CONFIG --log-file /var/log/home-assistant.log --log-rotate-days 3
+    procd_set_param command $VENV/bin/hass --config $HA_CONFIG --log-file $HA_LOG_FILE --log-rotate-days 3
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_close_instance
