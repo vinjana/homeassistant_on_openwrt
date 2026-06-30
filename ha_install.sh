@@ -94,6 +94,12 @@ HA_LOG_FILE="${HA_LOG_FILE:-/var/log/home-assistant.log}"
 # but history is lost on reboot. Point at a persistent path to keep history.
 HA_DB_URL="${HA_DB_URL:-sqlite:////tmp/homeassistant.db}"
 
+# Install HASS Configurator, an unauthenticated web-based file editor on port
+# 3218; override via HA_INSTALL_CONFIGURATOR=1 or --with-configurator.
+# Disabled by default: it's extra install time/RAM and an unauthenticated
+# editor exposed on the network.
+HA_INSTALL_CONFIGURATOR="${HA_INSTALL_CONFIGURATOR:-}"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --tmp-dir)
@@ -136,8 +142,16 @@ while [ $# -gt 0 ]; do
       HA_DB_URL="${1#*=}"
       shift
       ;;
+    --with-configurator)
+      HA_INSTALL_CONFIGURATOR=1
+      shift
+      ;;
+    --no-configurator)
+      HA_INSTALL_CONFIGURATOR=""
+      shift
+      ;;
     --help|-h)
-      echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>] [--log-file <path>] [--db-url <url>]"
+      echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>] [--log-file <path>] [--db-url <url>] [--with-configurator|--no-configurator]"
       echo ""
       echo "Options:"
       echo "  --tmp-dir <path>    Temporary build directory (default: /root/tmp-ha)"
@@ -154,6 +168,10 @@ while [ $# -gt 0 ]; do
       echo "  --db-url <url>      recorder DB URL (default: sqlite:////tmp/homeassistant.db)"
       echo "                      Can also be set via the HA_DB_URL environment variable."
       echo "                      Default is tmpfs (lost on reboot); point at a persistent path to keep history."
+      echo "  --with-configurator Install HASS Configurator, a web-based file editor on port 3218 (default: disabled)"
+      echo "                      Can also be enabled via the HA_INSTALL_CONFIGURATOR environment variable."
+      echo "                      It has no authentication of its own; only enable it on a trusted network."
+      echo "  --no-configurator   Do not install HASS Configurator (default)."
       exit 0
       ;;
     *)
@@ -164,7 +182,11 @@ while [ $# -gt 0 ]; do
 done
 
 if pgrep -a -f "bin/hass"; then
-  echo "Stop running process of Home Assistant (and HASS Configurator) to free RAM for installation";
+  if [ "$HA_INSTALL_CONFIGURATOR" ]; then
+    echo "Stop running process of Home Assistant (and HASS Configurator) to free RAM for installation";
+  else
+    echo "Stop running process of Home Assistant to free RAM for installation";
+  fi
   exit 1;
 fi
 
@@ -386,9 +408,6 @@ fnv-hash-fast==1.6.0  # cp313 musllinux wheels available; pure-Python workaround
 # aiodns installed in early pip block (aiodns==4.0.0); pycares upgraded to 5.0.1 by pip
 radios==0.3.2  # radio_browser
 async-upnp-client==0.46.2  # updated for aiohttp 3.13.3; old freeze was for aiohttp<3.9
-
-# extra services
-hass-configurator==0.6.0
 EOF
 
 if [ "$NEED_ZHA" ]; then
@@ -396,6 +415,13 @@ if [ "$NEED_ZHA" ]; then
 # zha requirements (zha package pulls in zigpy, bellows, zigpy-zigate, and other backends)
 $(version zha)
 $(version serialx)
+EOF
+fi
+
+if [ "$HA_INSTALL_CONFIGURATOR" ]; then
+  cat <<EOF >> "$STORAGE_TMP/requirements.txt"
+# extra services
+hass-configurator==0.6.0
 EOF
 fi
 
@@ -920,12 +946,20 @@ history:
 logger:
   default: warning
   logs: {}
+EOF
+
+  if [ "$HA_INSTALL_CONFIGURATOR" ]; then
+    cat <<EOF >> "$HA_CONFIG/configuration.yaml"
 
 panel_iframe:
   configurator:
     title: Configurator
     icon: mdi:square-edit-outline
     url: http://$IP:3218
+EOF
+  fi
+
+  cat <<EOF >> "$HA_CONFIG/configuration.yaml"
 
 group: !include groups.yaml
 automation: !include automations.yaml
@@ -961,7 +995,8 @@ EOF
 chmod +x /etc/init.d/homeassistant
 /etc/init.d/homeassistant enable
 
-cat <<EOF > /etc/init.d/hass-configurator
+if [ "$HA_INSTALL_CONFIGURATOR" ]; then
+  cat <<EOF > /etc/init.d/hass-configurator
 #!/bin/sh /etc/rc.common
 
 START=99
@@ -977,16 +1012,23 @@ start_service()
     procd_close_instance
 }
 EOF
-chmod +x /etc/init.d/hass-configurator
-/etc/init.d/hass-configurator enable
+  chmod +x /etc/init.d/hass-configurator
+  /etc/init.d/hass-configurator enable
+fi
 
 echo "Done."
 echo ""
 echo "Home Assistant is installed but not yet running."
 echo "To start now:    /etc/init.d/homeassistant start"
-echo "                 /etc/init.d/hass-configurator start"
-echo "Or simply reboot — both services start automatically on boot."
+if [ "$HA_INSTALL_CONFIGURATOR" ]; then
+  echo "                 /etc/init.d/hass-configurator start"
+  echo "Or simply reboot — both services start automatically on boot."
+else
+  echo "Or simply reboot — it starts automatically on boot."
+fi
 echo ""
 echo "Once running, open in your browser:"
 echo "  Home Assistant:    http://$IP:8123"
-echo "  HASS Configurator: http://$IP:3218"
+if [ "$HA_INSTALL_CONFIGURATOR" ]; then
+  echo "  HASS Configurator: http://$IP:3218"
+fi

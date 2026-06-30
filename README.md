@@ -172,11 +172,17 @@ installs, edit `db_url` in the `recorder:` block directly.
 
 ### Bundled extras
 
-The install script also installs and enables the following tools, which are not part of HA core:
+The install script can optionally install and enable the following tool, which is not part of HA core:
 
 | Tool | Port | Notes |
 |---|---|---|
-| [hass-configurator](https://github.com/danielperna84/hass-configurator) | 3218 | Web-based config file editor; verified working |
+| [hass-configurator](https://github.com/danielperna84/hass-configurator) | 3218 | Web-based config file editor; verified working. Not authenticated on its own — only enable it on a trusted network. |
+
+It is **disabled by default**. Enable it with `--with-configurator` (or `HA_INSTALL_CONFIGURATOR=1`):
+
+```sh
+sh ha_install.sh --with-configurator
+```
 
 ### Not supported
 

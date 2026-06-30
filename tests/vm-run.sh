@@ -1,9 +1,11 @@
 #!/bin/bash
 # Deploy and run ha_install.sh on the OpenWrt VM via SSH pipe.
 #
-# Usage: ./vm-run.sh [arch] [path/to/script.sh]
+# Usage: ./vm-run.sh [arch] [path/to/script.sh] [-- install-script-args...]
 #   arch:   x86_64 (default) or aarch64
 #   script: default is ../ha_install.sh
+#   install-script-args: forwarded verbatim to ha_install.sh on the VM,
+#                        e.g. --with-configurator
 
 set -euo pipefail
 
@@ -16,7 +18,14 @@ if [[ "${1:-}" == "x86_64" || "${1:-}" == "aarch64" ]]; then
     shift
 fi
 
-INSTALL_SCRIPT="${1:-$SCRIPT_DIR/../ha_install.sh}"
+INSTALL_SCRIPT="$SCRIPT_DIR/../ha_install.sh"
+if [[ "${1:-}" != "--" && -n "${1:-}" ]]; then
+    INSTALL_SCRIPT="$1"
+    shift
+fi
+if [[ "${1:-}" == "--" ]]; then
+    shift
+fi
 
 # shellcheck source=vm-lib.sh
 source "$SCRIPT_DIR/vm-lib.sh"
@@ -35,5 +44,5 @@ fi
 
 wait_for_internet
 
-echo "Running $(basename "$INSTALL_SCRIPT") on $ARCH VM..."
-ssh_run 'sh -s' < "$INSTALL_SCRIPT"
+echo "Running $(basename "$INSTALL_SCRIPT") on $ARCH VM${*:+ with args: $*}..."
+ssh_run 'sh -s --' "$@" < "$INSTALL_SCRIPT"
