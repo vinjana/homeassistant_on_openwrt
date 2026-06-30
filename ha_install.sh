@@ -891,6 +891,8 @@ recorder:
       - sensor.*presence_*
       - light.*
 
+history:
+
 panel_iframe:
   configurator:
     title: Configurator
