@@ -100,9 +100,11 @@ sh ha_install.sh \
 | Option | Default | What moves to the external disk |
 |---|---|---|
 | `--venv-dir` | `/opt/homeassistant` | Python venv (~250 MB of packages) |
-| `--config-dir` | `/etc/homeassistant` | Config files and the SQLite database |
+| `--config-dir` | `/etc/homeassistant` | Config files (the SQLite database itself lives under `--db-url`) |
+| `--db-url` | `sqlite:////tmp/homeassistant.db` | The recorder's SQLite database |
 
-Both options can also be set via environment variables (`HA_VENV_DIR`, `HA_CONFIG_DIR`).
+Both `--venv-dir` and `--config-dir` can also be set via environment variables (`HA_VENV_DIR`, `HA_CONFIG_DIR`);
+`--db-url` via `HA_DB_URL`.
 Run `sh ha_install.sh --help` to see all options.
 
 ### Temporary build directory
@@ -133,7 +135,15 @@ todo lists, shopping list, person tracking, zones, tags, alerts, webhooks,
 Python scripts, dashboard (Lovelace), history, logbook, energy dashboard, and backup.
 
 The recorder uses SQLite. The default configuration stores the database in `/tmp` (RAM, cleared on reboot).
-Set `db_url` in the `recorder:` block to a persistent path if you need history to survive reboots.
+Pass `--db-url` (or set `HA_DB_URL`) to the install script to point the generated `configuration.yaml`
+at a persistent path instead, e.g.:
+
+```sh
+sh ha_install.sh --db-url 'sqlite:////mnt/external/ha-config/homeassistant.db'
+```
+
+This only takes effect on first install, when `configuration.yaml` is generated; on existing
+installs, edit `db_url` in the `recorder:` block directly.
 
 ### Integrations
 

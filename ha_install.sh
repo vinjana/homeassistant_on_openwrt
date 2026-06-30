@@ -89,6 +89,11 @@ HA_CONFIG="${HA_CONFIG_DIR:-/etc/homeassistant}"
 # HA log file path; override via HA_LOG_FILE or --log-file.
 HA_LOG_FILE="${HA_LOG_FILE:-/var/log/home-assistant.log}"
 
+# recorder DB URL; override via HA_DB_URL or --db-url.
+# Default lives on tmpfs (/tmp) so flash isn't worn down by constant writes,
+# but history is lost on reboot. Point at a persistent path to keep history.
+HA_DB_URL="${HA_DB_URL:-sqlite:////tmp/homeassistant.db}"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --tmp-dir)
@@ -123,8 +128,16 @@ while [ $# -gt 0 ]; do
       HA_LOG_FILE="${1#*=}"
       shift
       ;;
+    --db-url)
+      HA_DB_URL="$2"
+      shift 2
+      ;;
+    --db-url=*)
+      HA_DB_URL="${1#*=}"
+      shift
+      ;;
     --help|-h)
-      echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>] [--log-file <path>]"
+      echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>] [--log-file <path>] [--db-url <url>]"
       echo ""
       echo "Options:"
       echo "  --tmp-dir <path>    Temporary build directory (default: /root/tmp-ha)"
@@ -138,6 +151,9 @@ while [ $# -gt 0 ]; do
       echo "                      Point at an external mount so the SQLite DB does not fill internal flash."
       echo "  --log-file <path>   HA log file path (default: /var/log/home-assistant.log)"
       echo "                      Can also be set via the HA_LOG_FILE environment variable."
+      echo "  --db-url <url>      recorder DB URL (default: sqlite:////tmp/homeassistant.db)"
+      echo "                      Can also be set via the HA_DB_URL environment variable."
+      echo "                      Default is tmpfs (lost on reboot); point at a persistent path to keep history."
       exit 0
       ;;
     *)
@@ -881,7 +897,7 @@ tts:
 
 recorder:
   purge_keep_days: 1
-  db_url: 'sqlite:////tmp/homeassistant.db'
+  db_url: '$HA_DB_URL'
   include:
     entity_globs:
       - sensor.*illuminance_*
@@ -892,6 +908,18 @@ recorder:
       - light.*
 
 history:
+  include:
+    entity_globs:
+      - sensor.*illuminance_*
+      - sensor.*btn0_*
+      - sensor.*temperature_*
+      - sensor.*humidity_*
+      - sensor.*presence_*
+      - light.*
+
+logger:
+  default: warning
+  logs: {}
 
 panel_iframe:
   configurator:
