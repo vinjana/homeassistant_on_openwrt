@@ -2,3 +2,7 @@
 .claude/local/
 .claude/*.local.*
 .mcp.json
+
+# IntelliJ IDEA
+.idea/
+*.iml
