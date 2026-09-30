@@ -1,0 +1,4 @@
+# Claude Code: personal files and settings
+.claude/local/
+.claude/*.local.*
+.mcp.json

@@ -25,6 +25,10 @@ After script prints `Done.` you have Home Assistant installed.
 Start the service or reboot the device to get it start automatically.
 The web interface will be on 8123 port after all components load.
 
+If Home Assistant crashes or the kernel kills it because the device is out of memory,
+procd restarts it after 30 seconds. procd stops trying after 5 runs in a row that each
+lasted less than one hour.
+
 ![Home Assistant](homeassistant.png)
 
 The only components with flows included are MQTT and ZHA.

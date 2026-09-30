@@ -987,6 +987,9 @@ start_service()
     [ -x $VENV/bin/hass ] || { logger -t homeassistant "$VENV/bin/hass not found — external disk not mounted?"; return 0; }
     procd_open_instance
     procd_set_param command $VENV/bin/hass --config $HA_CONFIG --log-file $HA_LOG_FILE --log-rotate-days 3
+    # Restart after crashes and OOM kills; the 30 s delay lets memory settle.
+    # Give up after 5 runs shorter than 1 h to stop a crash loop.
+    procd_set_param respawn 3600 30 5
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_close_instance
@@ -1007,6 +1010,7 @@ start_service()
     [ -x $VENV/bin/hass-configurator ] || { logger -t hass-configurator "$VENV/bin/hass-configurator not found — external disk not mounted?"; return 0; }
     procd_open_instance
     procd_set_param command $VENV/bin/hass-configurator -b $HA_CONFIG
+    procd_set_param respawn 3600 30 5
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_close_instance
