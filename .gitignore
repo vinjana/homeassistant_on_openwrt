@@ -1,6 +1,7 @@
 # Claude Code: personal files and settings
 .claude/local/
 .claude/*.local.*
+/CLAUDE.local.md
 .mcp.json
 
 # IntelliJ IDEA

@@ -14,6 +14,7 @@
 # Globals set by arch_config:
 #   IMG_NAME          base image filename (no path)
 #   IMG_URL           download URL for .img.gz
+#   IMG_SHA256        SHA-256 of the .img.gz, from the release's sha256sums file
 #   SSH_PORT          host-side SSH port for this arch
 #   QEMU              QEMU binary name
 #   QEMU_EXTRA_ARGS   (array) extra arguments for the QEMU launch command
@@ -22,7 +23,22 @@
 # Globals set by init_ssh (requires SSH_PORT):
 #   SSH_ARGS   (array) full ssh invocation ready for "${SSH_ARGS[@]}"
 
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    echo "These scripts require Bash >= 4.4 (found ${BASH_VERSION})" >&2
+    exit 11  # EXIT_PREREQ, defined below
+fi
 set -euo pipefail
+shopt -s inherit_errexit
+
+# Exit codes of the vm-*.sh scripts (1 and 2 are left to Bash itself).
+# shellcheck disable=SC2034  # used by the sourcing scripts
+EXIT_USAGE=10          # unknown arch, step or argument
+# shellcheck disable=SC2034
+EXIT_PREREQ=11         # missing host package, image or install script
+# shellcheck disable=SC2034
+EXIT_VM=12             # VM not reachable, already running, or failed to start
+# shellcheck disable=SC2034
+EXIT_CHECKS_FAILED=13  # vm-qualify.sh: at least one check failed
 
 # ---------------------------------------------------------------------------
 # arch_config ARCH
@@ -34,6 +50,7 @@ arch_config() {
         x86_64)
             IMG_NAME="openwrt-25.12.3-x86-64-generic-ext4-combined.img"
             IMG_URL="https://downloads.openwrt.org/releases/25.12.3/targets/x86/64/openwrt-25.12.3-x86-64-generic-ext4-combined.img.gz"
+            IMG_SHA256="f163654d0ced4bb8d5720bad6dfe88cbd37da9f50a0275239e6fb62c94faf530"
             SSH_PORT=2222
             QEMU=qemu-system-x86_64
             QEMU_EXTRA_ARGS=(-enable-kvm)
@@ -42,6 +59,7 @@ arch_config() {
         aarch64)
             IMG_NAME="openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img"
             IMG_URL="https://downloads.openwrt.org/releases/25.12.3/targets/armsr/armv8/openwrt-25.12.3-armsr-armv8-generic-ext4-combined-efi.img.gz"
+            IMG_SHA256="9b138bd085118a08e9e2bcf63290a7362a9fe8fec6b250099aff4d5bf68bab59"
             SSH_PORT=2223
             QEMU=qemu-system-aarch64
             local efi_fw=""
@@ -57,14 +75,14 @@ arch_config() {
             if [[ -z "$efi_fw" ]]; then
                 echo "ERROR: aarch64 EFI firmware not found." >&2
                 echo "Install with: sudo apt-get install qemu-efi-aarch64" >&2
-                exit 1
+                exit "$EXIT_PREREQ"
             fi
             QEMU_EXTRA_ARGS=(-machine virt -cpu cortex-a57 -bios "$efi_fw")
             IMG_PATTERN="armsr-armv8-generic-ext4-combined-efi"
             ;;
         *)
             echo "Unknown arch '$ARCH'. Supported: x86_64, aarch64" >&2
-            exit 1
+            exit "$EXIT_USAGE"
             ;;
     esac
 }
@@ -80,7 +98,7 @@ init_ssh() {
         -o UserKnownHostsFile=/dev/null
         -o ConnectTimeout=5
         -o BatchMode=yes
-        root@localhost
+        root@127.0.0.1
         -p "$SSH_PORT"
     )
 }
@@ -101,7 +119,7 @@ wait_for_ssh() {
     local poll_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o BatchMode=yes)
     echo "Waiting for VM SSH (up to $((max_tries * interval)) s)..."
     for _ in $(seq 1 "$max_tries"); do
-        if ssh "${poll_opts[@]}" root@localhost -p "$SSH_PORT" 'echo ok' 2>/dev/null; then
+        if ssh "${poll_opts[@]}" root@127.0.0.1 -p "$SSH_PORT" 'echo ok' 2>/dev/null; then
             echo "VM is ready."
             return 0
         fi

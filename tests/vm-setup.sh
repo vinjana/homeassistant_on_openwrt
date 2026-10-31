@@ -37,6 +37,11 @@ if [[ ! -f "$IMG" ]]; then
     else
         echo "Found existing .gz, skipping download."
     fi
+    # Pinned hash: a compromised mirror cannot also serve a matching sha256sums file.
+    if ! echo "$IMG_SHA256  $IMG_GZ" | sha256sum -c --quiet -; then
+        echo "ERROR: checksum mismatch for $IMG_GZ; delete it and run again." >&2
+        exit "$EXIT_PREREQ"
+    fi
     echo "Decompressing..."
     gunzip "$IMG_GZ"
 else
@@ -117,7 +122,7 @@ fi
 # ── Step 5: inject uci-defaults script for QEMU SSH networking ───────────────
 #
 # Goal: make the VM reachable via SSH on host port $SSH_PORT using QEMU's
-# user-mode (SLIRP) networking with a hostfwd tcp::${SSH_PORT}->:22 rule.
+# user-mode (SLIRP) networking with a hostfwd tcp:127.0.0.1:${SSH_PORT}->:22 rule.
 #
 # Why not patch /etc/config/network directly?
 #   We tried writing a DHCP config to /etc/config/network via debugfs before
@@ -142,7 +147,7 @@ fi
 #
 # NIC assignment in QEMU (see vm-start.sh):
 #   NIC 1 (eth0) → first -nic argument  → br-lan, 192.168.1.1, untouched
-#   NIC 2 (eth1) → second -nic argument, hostfwd tcp::${SSH_PORT}->:22 → DHCP
+#   NIC 2 (eth1) → second -nic argument, hostfwd tcp:127.0.0.1:${SSH_PORT}->:22 → DHCP
 #
 # The uci-defaults script configures eth1 as a DHCP interface named 'qemu'
 # and adds it to the LAN firewall zone, which allows incoming SSH.

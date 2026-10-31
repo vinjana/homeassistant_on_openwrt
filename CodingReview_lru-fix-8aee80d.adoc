@@ -1,0 +1,480 @@
+:doctype: article
+:toc: left
+:sectnums:
+:revdate: 2026-11-11
+:reviewer: claude claude-opus-5-5
+
+= Coding Review lru-fix
+
+== Summary
+
+Verdict:: Requires changes
+Required findings:: 12
+Advisory findings:: 17
+
+The change set migrates the installer from OpenWrt 23.05 (opkg, system Python) to OpenWrt
+25.12 (apk, Python 3.13, HA 2026.2). HA now lives in a venv. New options are
+`--venv-dir`, `--config-dir`, `--tmp-dir`, `--log-file`, `--db-url` and
+`--with-configurator`. It also adds procd auto-restart, a QEMU VM test suite, the bounded
+LRU fix and the PyPI download for hass-nabucasa.
+
+A fresh install with the default options works on x86_64 and aarch64 (20/20 and 19/19).
+But three things block the change:
+
+* The upgrade path does not work. A second run aborts because `uv venv` refuses an existing
+  venv. This was verified in a VM, and it means installs that already leak memory cannot
+  get the fix.
+* Two new options feed paths into `rm -rf` as root without protection.
+* The README's install URL and several of its sections are wrong for 25.12.
+
+Purpose of this review: the developer's own quality check, not an upstream merge request.
+Persona findings that the baseline sections already cover are cross-referenced, not
+repeated.
+
+== Meta
+
+Branch:: `lru-fix`, compared against `23.05` (23 commits, 13 files, +1761/−277)
+Commit:: `8aee80d`
+Conventions doc:: none; the plugin's rules apply (recorded in `.claude/CLAUDE.local.md`)
+Review date:: 2026-11-11
+
+== Legend
+
+* `Required`: must be fixed before this change is accepted. It violates a SHALL rule, is a
+  correctness or security issue, or breaks an explicit project conventions-doc rule.
+* `Advisory`: worth addressing, but does not block acceptance. It is a SHOULD-rule deviation
+  or a style or design suggestion.
+
+"New" means this change set introduced it. "Pre-existing" means it was already in 23.05.
+
+== General Defect / Logic Review
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| D1
+| `ha_install.sh:318-319`: `pip3 install uv` (unpinned), then `uv venv --system-site-packages --seed "$VENV"`. New.
+| **Verified in a VM:** a second run over an existing install aborts with `error: Failed to
+  create virtual environment / cause: A virtual environment already exists at:
+  /opt/homeassistant` (uv 0.13.7, exit 2). The README's "Upgrading" section and the
+  changelog entry tell leaking installs to re-run, so the documented fix for the memory leak
+  cannot be applied. Because uv is unpinned, the behaviour also changes with the uv version.
+| Pin `uv`, and decide whether to replace (`--clear`) or reuse (`--allow-existing`) the venv. Add a re-run step to the VM test (see T1).
+| Required
+
+| D2
+| `ha_install.sh:105-111`, `:193-195`, `:885`: `rm -rf "$STORAGE_TMP"` on the value of the new `--tmp-dir`/`HA_TMP_DIR`. New.
+| The script deletes the path the user gave, at the start and at the end, as root. A natural
+  `--tmp-dir /mnt/external` (the mount point, as with "put it on the external disk")
+  deletes the venv, the config and everything else on that disk. `--tmp-dir /root`
+  deletes root's home. Raised independently by SO, RMO and Operator.
+| Treat the option as a parent: `mktemp -d "$base/ha-install.XXXXXX"`, and remove only that child (ideally from a `trap`, see RM3).
+| Required
+
+| D3
+| `ha_install.sh:877` `+rm -rf $VENV_SITE_PACKAGES/homeassistant*+`, `:476-477`
+  (pycountry), `:454` (`sed` on a glob). These paths were fixed in 23.05; they come from the
+  new `--venv-dir`.
+| The paths are unquoted. With a space in `--venv-dir`, e.g. `"/mnt/my disk/ha"`, the shell
+  splits them, and line 877 runs `+rm -rf /mnt/my disk/ha/lib/...+`, which deletes `/mnt/my`.
+  shellcheck flags all three (SC2086).
+| Quote the variable part: `+rm -rf "$VENV_SITE_PACKAGES"/homeassistant*+`. Also validate the path options once (see S2).
+| Required
+
+| D4
+| `ha_install.sh:193-194`: `check_free_space` runs before `rm -rf "$STORAGE_TMP"`. New.
+| Leftovers from an earlier failed run count against the 512 MB free-space check, so a retry
+  after a failed install is refused needlessly.
+| Swap the two lines.
+| Advisory
+
+| D5
+| `ha_install.sh:85-86`, `:165`, help text of `--config-dir`. New.
+| It says that moving the config dir keeps "the SQLite DB" off flash. The DB location is set
+  by `--db-url` (default `/tmp`). The README table (`:125-126`) has it right.
+| Align the help text and the comment with the README.
+| Advisory
+
+| D6
+| `ha_install.sh:991-1011`: a re-run without `--with-configurator`. New.
+| `/etc/init.d/hass-configurator` from an earlier run stays enabled. An unauthenticated
+  editor then keeps starting at boot, although the user turned it off.
+| Disable and remove the init script in the else branch.
+| Advisory
+|===
+
+== Design & Quality
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| Q1
+| `ha_install.sh` as a whole, 1,000+ lines of shell (BashShell.adoc: "keep shell scripts to orchestration/glue").
+| Many sed/`mlpatch` patches, inline Python and stubs are plain procedural code, with no
+  functions around the patch steps. The smells, named only: *Long Method* (the whole
+  script), *Shotgun Surgery* (every HA bump touches dozens of seds), *Silent Failure* (a sed
+  whose pattern no longer matches exits 0; see RM5). The project's task `shunit2-unit-tests`
+  already covers part of this.
+| (Smells are only named here, not fixed.)
+| Advisory
+
+| Q2
+| Path-like options (`ha_install.sh:103-152`). New.
+| No assumption about the values is made explicit. Absolute path, no `/`, no whitespace, and
+  an existing mount: none of these is checked, although the values feed `rm -rf`, init
+  scripts and YAML (D2, D3, S2).
+| One validation function right after parsing.
+| Advisory (Required parts covered by D2/D3)
+|===
+
+== Security
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| S1
+| `tests/vm-start.sh:53`: `hostfwd=tcp::${SSH_PORT}-:22`. New.
+| The forward listens on **all** host interfaces, not just localhost. Together with stock
+  OpenWrt's empty root password (SSH works with `BatchMode=yes`, `tests/vm-lib.sh:82`),
+  anyone on the developer's network gets a root shell on the VM on port 2222/2223. Through
+  QEMU's gateway (10.0.2.2) they can then reach the host's localhost-only services.
+| `hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22`.
+| Required
+
+| S2
+| `ha_install.sh:977-979`, `:1000-1002`, `:916`: `$VENV`, `$HA_CONFIG` and `$HA_LOG_FILE` go unquoted into root init scripts; `$HA_DB_URL` goes into single-quoted YAML. New.
+| A space, `;`, `+$(...)+` or `'` breaks the init script or the config, or runs as a command at
+  every boot. The operator supplies these values, so no trust boundary is crossed; they are
+  a robustness issue more than an attack. A `--db-url` with a password ends up in a
+  world-readable (0644) `configuration.yaml`.
+| See Q2. For credentials: `secrets.yaml` with mode 0600 and `!secret`, or document "SQLite only".
+| Advisory
+
+| S3
+| Downloads protected only by TLS: `:481`, `:500-503`, `:532`, `:210-217`. Already known from the earlier review.
+| The PyPI simple index already sends `+#sha256=…+` with each link, and `:502` drops it
+  with `cut`. `uv`, `wheel`, `netifaces2` and `typing-extensions` are installed without
+  version pins (`:318`, `:324`, `:432`, `:528`).
+| One `fetch_verified url sha256` helper, and pins (separate task).
+| Advisory
+
+| S4
+| External storage: README `:134-145`. New.
+| On FAT/exFAT sticks the venv and config have no Unix permissions. Physical access to the
+  stick then means root code execution at boot, and access to the HA tokens in `.storage/`.
+| README: use ext4; physical access means root.
+| Advisory
+
+| S5
+| hass-configurator when enabled: `:422-427`, `:941-949`. Improved over 23.05 (off by default, warned in the docs).
+| It still has no login, runs as root, listens on all interfaces, and `panel_iframe` uses
+  plain http. Anyone on the LAN can edit `+/etc/init.d/*+`, which means root code execution.
+  (That upstream's `ENFORCE_BASEPATH` defaults to off is unverified.)
+| Generate settings with `ENFORCE_BASEPATH`, `ALLOWED_NETWORKS` and `CREDENTIALS`, or state "root for the whole LAN" in the README.
+| Advisory
+|===
+
+=== Interface Changes & Security Review
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| I1
+| New CLI surface: six options, environment variables, and the process exit codes 1 and 2 (`uv` passes its own 2 through, D1).
+| There is no arc42 documentation, so there is no interface chapter or security-review field
+  to update. The options themselves are documented consistently in `--help` and
+  `README.md`. Most of this change set came before the plugin was set up, so it did not go
+  through the `plan` workflow.
+| When arc42 docs are set up (`/architecture-docs`), document the CLI as the operator interface, including its exit codes.
+| Advisory
+|===
+
+== Testing
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| T1
+| `tests/vm-test.sh`, `vm-qualify.sh`. New.
+| The end-to-end test covers only a **fresh** install with **default** options. Not covered:
+  a re-run (it fails, see D1), `--venv-dir`/`--config-dir`/`--db-url`/`--with-configurator`,
+  a reboot (only the `enabled` link is checked), and a second disk. `vm-test.sh` cannot pass
+  installer options, and its venv-dir argument reaches only `vm-qualify.sh`.
+| Forward `-- args` from `vm-test.sh` to `vm-run.sh`. Add re-run and reboot steps, and one run with the options.
+| Required
+
+| T2
+| `tests/vm-start.sh:48` `-m 1024` vs README `:13` "256 MB RAM". New.
+| The stated minimum RAM was never tested; the VMs have four times as much.
+| Run one qualification with `-m 256`, or correct the requirement.
+| Advisory
+
+| T3
+| `vm-qualify.sh`: HA is checked only by "port 8123 listens".
+| Integrations that fail at setup (ZHA stubs, `default_config` trimming, see RM5) do not fail
+  the test.
+| Fail on `Setup failed for` / `ImportError` in the HA log.
+| Advisory
+|===
+
+== Documentation Currency
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| DC1
+| `README.md:20-21`, `:114-115`: install URL `+.../openlumi/homeassistant_on_openwrt/25.12/ha_install.sh+`. New.
+| **Verified with `git ls-remote`:** neither openlumi nor the fork has a `25.12` branch.
+  The documented command gets a 404, and `+wget ... \| sh+` then runs nothing. Together with
+  D1, users have no working way to install or upgrade.
+| Create the branch, or point the URL at a branch that exists.
+| Required
+
+| DC2
+| `README.md:252-274`, "Enabling other components" (text from 23.05, wrong since the venv). New.
+| It names HA 2024.3.3, `/usr/lib/python3.11/site-packages`, `pip3`, opkg and ipk. Files
+  copied there are ignored by the venv install. `README.md:34` ("only MQTT and ZHA have
+  flows") contradicts `ha_install.sh:820-825`, which also enables esphome, met and
+  radio_browser.
+| Update it to `$VENV/lib/python3.13/site-packages`, `$VENV/bin/pip` and apk. Fix the flow list.
+| Required
+
+| DC3
+| `README.md:12` "256 MB storage" vs `ha_install.sh:193` (512 MB free required in the tmp dir). New.
+| A device that meets the stated requirement is rejected. There is no free-space check for
+  the venv or config filesystem, so a re-run with a forgotten `--venv-dir` can fill the
+  overlay and break LuCI/uci saves. Raised by End-User, Operator and RMO.
+| State the real peak need for tmp, venv and apk. Check the venv filesystem too.
+| Required
+
+| DC4
+| Migration from 23.05: not documented. New.
+| The only path is a sysupgrade to 25.12, and that wipes `/etc/homeassistant` unless it is
+  listed in `/etc/sysupgrade.conf`. Old configs keep a `panel_iframe` pointing at the
+  configurator, which is now off. Users can lose their whole HA config. Raised by End-User
+  and Operator.
+| A "Migrating from 23.05" section: back up the config dir, add it to `sysupgrade.conf`, sysupgrade, then a fresh install.
+| Required
+
+| DC5
+| Every later 25.12.x sysupgrade with the venv on an external disk. New.
+| A sysupgrade removes the apk Python packages and `/etc/init.d/homeassistant`. The venv
+  on the disk survives, but its interpreter and system packages are gone. HA then crashes 5
+  times, procd gives up, and the log is misleading.
+| Document "after a sysupgrade, re-run the script with the same options" (needs D1 fixed).
+| Required
+
+| DC6
+| `README.md:281-294`, changelog.
+| Only today's two fixes are listed. The migration itself is missing: venv, new options,
+  configurator off by default, auto-restart, 23.05 → 25.12.
+| Add a 25.12 entry.
+| Advisory
+
+| DC7
+| Auto-restart gives up silently after 5 short runs (`:982`). New.
+| Users and operators are not told how to notice this (`logread -e homeassistant`) or how
+  to recover. Heating, locks and alarms then stop without notice.
+| 2–3 lines in the README.
+| Advisory
+
+| DC8
+| `tests/README.adoc:127`, `:164`.
+| It says "stop and restart the VM (to get a clean state)", but only `--step setup`
+  restores the image. "hass-configurator answers on 3218" is listed without the condition
+  that it is enabled.
+| Fix both lines.
+| Advisory
+|===
+
+== Language-Specific Findings
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| L1
+| BashShell.adoc / LanguageDefaults.adoc, applied to the new code (`check_free_space`, option parsing, `mlpatch`, `+tests/vm-*.sh+`).
+| Several SHALL rules are not met:
+  * The script's own errors exit with code 1 (`ha_install.sh:64`, `:179`, `:190`, `+tests/vm-*.sh+`).
+  * Positional parameters are bound without `:?` (`local path="$1"`).
+  * `ha_install.sh` sets `set -eu` without `pipefail`, although busybox ash supports it.
+    This lets a failed `wget` at `:210-221` produce an empty requirements file (RM10).
+  * There is no shellcheck in a pre-commit hook or CI.
+
+  Most of the old upstream code has the same patterns.
+| Fix them for the new code: an exit-code table (with codes other than 1 and 2), `${1:?purpose}`, `set -o pipefail` after checking every pipeline, and a shellcheck pre-commit hook.
+| Required
+
+| L2
+| shellcheck.
+| `shellcheck -s dash ha_install.sh` gives 4 × SC2086; three of them are D3.
+  `+shellcheck -x tests/vm-*.sh+` gives one SC2119 (info) in `vm-run.sh:45`.
+| See D3.
+| Advisory (covered)
+|===
+
+The AsciiDoc code-span check passes on `tests/README.adoc`.
+
+== Process / Shielding
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| P1
+| `.claude/CLAUDE.local.md`: the plugin setup, the docs-layout override and the persona decision. The developer kept these local on purpose, because the repo is a fork.
+| A gitignored file is not a valid override under the plugin's Shielding rule, and the
+  initialization check does not see it. This is unchanged since the review of `f2010eb`.
+| Accept it, or move the setup to a tracked `.claude/CLAUDE.md`.
+| Required
+|===
+
+== Stakeholder Persona Review
+
+All four personas ran as independent subagents (standing decision in `.claude/CLAUDE.local.md`).
+
+=== End-User
+
+No stakeholder description or intended-purpose statement exists, so the Specification
+Review was skipped. That gap is itself a finding (EU5).
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| EU1 | Install URL. | See DC1. | | Required (as DC1)
+| EU2 | Storage requirement. | See DC3. | | Required (as DC3)
+| EU3 | Re-run. The installer does not remember its first-run options. | See D1. A forgotten option installs a second venv. | Store the options, e.g. in the init script, and use them as defaults on a re-run. | Advisory
+| EU4 | Migration from 23.05, stale README section. | See DC4 and DC2. | | Required (as DC4/DC2)
+| EU5
+| Generated config: `tts: language: ru` (`:912`; pre-existing). No "intended users" text.
+| Non-Russian users get Russian TTS without being told. The users' expected competency is
+  not documented.
+| Use `en`, or leave the language out. Add an "Intended users" paragraph.
+| Advisory
+
+| EU6
+| `:184-190`, message "Stop running process…".
+| It does not say how. With respawn on, killing `hass` by hand gets it restarted. Options
+  such as `--db-url` and `--with-configurator` are silently ignored on a re-run when
+  `configuration.yaml` exists.
+| Print the exact `+/etc/init.d/... stop+` commands. Print a note when options have no effect.
+| Advisory
+|===
+
+=== Operator
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| OP1 | Migration, re-run, disk budget, sysupgrade, `--tmp-dir`. | See DC4, D1, DC3, DC5 and D2. | | Required (as referenced)
+| OP2 | RAM budget. | See T2. | | Advisory (as T2)
+| OP3
+| External disk not mounted at install time (`:59`, `:319`, `:903`).
+| `mkdir -p` silently creates the target on internal flash, which can fill the overlay.
+| Abort when an explicit path does not exist yet, or its parent is not a mount point.
+| Advisory
+
+| OP4 | Configurator stays enabled on a re-run; the give-up is not noticed; stale docs; test operability. | See D6, DC7, DC2/DC8 and T1. | | (as referenced)
+|===
+
+=== Information Security Officer
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| SO1 | `--tmp-dir`. | See D2. | | Required (as D2)
+| SO2 | VM SSH forward. | See S1. | | Required (as S1)
+| SO3 | Injection into init scripts and YAML, credentials in `--db-url`, external FAT media, configurator, unpinned tools, checksums. | See S2–S5. | | Advisory (as referenced)
+| SO4
+| `tests/vm-setup.sh:36`: the OpenWrt image is downloaded without a checksum. New.
+| Developer tooling only.
+| Check it against the release's `sha256sums`.
+| Advisory
+
+| SO5
+| `:95`: the default DB is in world-writable `/tmp`, and HA runs as root. Pre-existing.
+| A symlink planted there would let root write through it. Low risk on OpenWrt.
+| Long term: a dedicated user, and the DB in a 0700 directory.
+| Advisory
+|===
+
+=== Risk Management Officer
+
+There is no risk catalogue, so risks are described, not scored.
+
+[cols="1,3,3,2,1", options="header"]
+|===
+| # | Context | Problem | Solution | Force
+
+| RM1 | `--tmp-dir` deletion; flash filling up. | See D2 and DC3. | | Required (as referenced)
+| RM2
+| No rollback on upgrade (`:877`, `:893`): HA is deleted before it is reinstalled into the live venv.
+| If an upgrade fails, HA is gone. The init guard returns 0 silently, so home automation
+  stays down.
+| Build into a staging venv `$VENV.new`, check it, then swap with `mv`.
+| Advisory
+
+| RM3
+| No `trap`. `TMPDIR` points at flash for all subprocesses (`:196`). New.
+| An aborted install leaves up to 512 MB on flash, and the install writes more to flash
+  than 23.05 did.
+| `trap 'rm -rf "$own_tmpdir"' EXIT`, combined with D2.
+| Advisory
+
+| RM4
+| procd respawn (`:982`). New.
+| Each OOM restart repeats the startup memory peak. The kernel may then kill
+  `dnsmasq`/`hostapd` instead of HA, which breaks the home network.
+| Raise HA's `oom_score_adj` (e.g. 500–1000) so the kernel kills HA first.
+| Advisory
+
+| RM5
+| Silent sed/`mlpatch` patches and stubs (`:730-731`, `:743-746`, `:779-814`). Mostly new.
+| If a pattern no longer matches, the install still succeeds, but ZHA (the main integration
+  on Lumi gateways) is then unavailable. The `default_config` trimming with `s/"x",//`
+  misses the last list element.
+| Check each patch with `grep -q` and abort when it did not apply. Edit `manifest.json` with Python and JSON, as at `:720-728`. See also T3.
+| Advisory (Required for the ZHA path before release to gateway users)
+
+| RM6
+| System Python changes: `apk fix` with its output hidden, `pip3 install uv` system-wide (`:308`, `:318`). New.
+| apk does not track these changes, so the system Python is modified and can't be reproduced.
+| Install uv into the venv or temp. Limit `apk fix` to this script's packages.
+| Advisory
+|===
+
+== Action Items
+
+Required::
+. D1: make re-runs work (pin uv; `--clear` or `--allow-existing`). Until then the upgrade instructions and the changelog are wrong.
+. D2: never `rm -rf` the user-given `--tmp-dir`; use a `mktemp -d` child.
+. D3: quote `$VENV_SITE_PACKAGES` at `ha_install.sh:877`, `:476-477`, `:454`.
+. DC1: fix the install URL (no `25.12` branch exists).
+. DC2: update "Enabling other components" and the flow list for the venv layout.
+. DC3: make the stated storage requirement match the 512 MB check; check the venv filesystem too.
+. DC4: document migrating from 23.05 (`sysupgrade.conf`, backup).
+. DC5: document re-running after a sysupgrade with an external venv.
+. S1: bind the VM SSH forward to `127.0.0.1`.
+. T1: VM tests for a re-run, the options and a reboot.
+. L1: Bash SHALL rules for the new code (exit codes, `:?`, `pipefail`, shellcheck hook).
+. P1: decide where the plugin setup lives (accept it, or move it to a tracked `.claude/CLAUDE.md`).
+
+Advisory::
+. D4, D5, D6: free-space check order, `--config-dir` help text, disable the configurator on a re-run.
+. Q1, Q2: name and reduce the procedural shell code; validate the path options in one place.
+. S2–S5, SO4, SO5: quoting and escaping into generated files, secrets, external FAT media, configurator hardening, checksums and pins, image checksum, DB in `/tmp`.
+. T2, T3: test at 256 MB RAM; fail the test on integration setup errors.
+. DC6, DC7, DC8: 25.12 changelog entry, auto-restart give-up, test README fixes.
+. I1: CLI interface and exit codes in future arc42 docs.
+. EU3, EU5, EU6, OP3: remember the install options; TTS language; clearer messages; unmounted target check.
+. RM2–RM6: staging venv, `trap`, `oom_score_adj`, verified patches, system Python changes.

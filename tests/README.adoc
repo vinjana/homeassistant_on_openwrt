@@ -78,8 +78,11 @@ The script is idempotent — safe to re-run.
 
 [source,bash]
 ----
-./vm-test.sh           # restore from pristine → start → install → qualify → stop
+./vm-test.sh   # setup → start → install → qualify → re-install → qualify → reboot → stop
 ----
+
+The second install run tests the documented upgrade path (re-running the script over an
+existing installation). The reboot step checks that Home Assistant starts on its own.
 
 If any step fails the VM is stopped automatically.
 To run a specific step only:
@@ -90,6 +93,8 @@ To run a specific step only:
 ./vm-test.sh --step start    # start VM and wait for SSH
 ./vm-test.sh --step run      # pipe ha_install.sh to the VM
 ./vm-test.sh --step qualify  # run qualification checks
+./vm-test.sh --step rerun    # stop HA and run ha_install.sh again
+./vm-test.sh --step reboot   # reboot and wait for HA to listen on port 8123
 ./vm-test.sh --step stop     # stop VM
 ./vm-test.sh --step all      # same as no --step: full run
 ----
@@ -98,6 +103,29 @@ To use a different install script:
 [source,bash]
 ----
 ./vm-test.sh x86_64 /path/to/modified_ha_install.sh
+----
+
+To pass options to the install script, put them after `--`. The venv path for the
+qualification checks is taken from `--venv-dir`:
+[source,bash]
+----
+./vm-test.sh x86_64 -- --tmp-dir /srv --venv-dir /srv/ha --config-dir /srv/ha-config \
+    --db-url sqlite:////srv/ha-config/home-assistant.db --with-configurator
+----
+
+The `rerun` step uses the same options. To test a re-run with different options, run the
+steps one by one, e.g. `./vm-test.sh --step run x86_64 -- --with-configurator`, then
+`./vm-test.sh --step rerun x86_64` and `./vm-test.sh --step qualify x86_64`.
+
+=== Porting to a new Home Assistant version
+
+`ha_install.sh` stops with exit code 16 when one of its patches of the Home Assistant source
+changes nothing. To list all such patches in one run instead, set `HA_PATCH_CHECK=warn` for the
+install script, for example:
+
+[source,bash]
+----
+ssh -p 2222 root@127.0.0.1 'HA_PATCH_CHECK=warn sh -s' < ../ha_install.sh 2>&1 | grep 'WARNING: patch'
 ----
 
 === Running the VM
@@ -111,7 +139,7 @@ To use a different install script:
 Connect manually:
 [source,bash]
 ----
-ssh -o StrictHostKeyChecking=no root@localhost -p 2222
+ssh -o StrictHostKeyChecking=no root@127.0.0.1 -p 2222
 ----
 
 === Installing Home Assistant
@@ -124,7 +152,7 @@ ssh -o StrictHostKeyChecking=no root@localhost -p 2222
 ----
 
 The script streams output directly to your terminal.
-On failure, fix `ha_install.sh`, stop and restart the VM (to get a clean state), then re-run.
+On failure, fix `ha_install.sh`, restore a clean image with `./vm-test.sh --step setup` (restarting the VM alone keeps the failed state), then re-run.
 
 === Resetting to a clean state
 
@@ -161,7 +189,9 @@ Checks performed:
 * No `LRU = lambda` replacement anywhere in the installed `homeassistant` package
 * HA service starts via `/etc/init.d/homeassistant start`
 * Port 8123 responds with a valid API response (up to 30 s wait)
-* hass-configurator answers on port 3218
+* The running `hass` process has `oom_score_adj` 800 (set by the init script)
+* With `--with-configurator`: hass-configurator answers on port 3218; without it: no configurator init script and nothing listens on port 3218
+* The HA log (path taken from the init script) exists and, 30 s after the port check, has no `Setup failed for`, `Error setting up`, `ImportError` or similar lines
 * HA init script is enabled (persists across reboot)
 
 Exit code 0 = all checks pass.

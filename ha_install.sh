@@ -2,9 +2,20 @@
 # shellcheck shell=dash
 # Homeassistant installer script by @devbis
 
+# Exit codes of this script; any other non-zero code comes from a failed command
+# (set -e). Documented in --help and README.md.
+EXIT_USAGE=10         # unknown option or missing option value
+EXIT_HA_RUNNING=11    # Home Assistant (or HASS Configurator) is still running
+EXIT_NO_SPACE=12      # not enough free disk space
+EXIT_NO_VERSION=13    # no Home Assistant release found for HOMEASSISTANT_MAJOR_VERSION
+EXIT_UNSAFE_PATH=14   # a path option is not an absolute path of safe characters
+EXIT_NO_TARGET=15     # a non-default directory does not exist (external disk not mounted?)
+EXIT_PATCH=16         # a patch of the Home Assistant source did not apply
+
 get_ha_version()
 {
-  wget -q -O- https://pypi.org/simple/homeassistant/ | grep "$HOMEASSISTANT_MAJOR_VERSION" | tail -n 1 | sed -n 's/.*homeassistant-\([0-9.ab]*\)\..*/\1/p'
+  # An empty result is handled by the caller; `|| true` keeps pipefail from aborting first.
+  wget -q -O- https://pypi.org/simple/homeassistant/ | grep "$HOMEASSISTANT_MAJOR_VERSION" | tail -n 1 | sed -n 's/.*homeassistant-\([0-9.ab]*\)\..*/\1/p' || true
 }
 
 get_python_version()
@@ -12,82 +23,190 @@ get_python_version()
   # apk list output: "python3-base-3.13.9-r3 x86_64 ..." — extract major.minor
   # sed targets the package name prefix directly to avoid matching other
   # version-like strings (e.g. license identifiers) elsewhere on the line.
-  apk list python3-base 2>/dev/null | sed -n 's/^python3-base-\([0-9]*\.[0-9]*\)\.[0-9].*/\1/p' | head -1
+  apk list python3-base 2>/dev/null | sed -n 's/^python3-base-\([0-9]*\.[0-9]*\)\.[0-9].*/\1/p' | tail -n 1
 }
 
 get_version()
 {
-  local pkg="$1"
-  grep -i -m 1 "${pkg}[<=>]=" "$STORAGE_TMP/ha_requirements.txt" | sed 's/.*[<=>]=\(.*\)/\1/g'
+  local pkg="${1:?package name}"
+  # No match yields an empty version; pip then reports the unpinned package.
+  grep -i -m 1 "${pkg}[<=>]=" "$STORAGE_TMP/ha_requirements.txt" | sed 's/.*[<=>]=\(.*\)/\1/g' || true
 }
 
 version()
 {
-  local pkg="$1"
+  local pkg="${1:?package name}"
   echo "$pkg==$(get_version "$pkg")"
 }
 
+# Both print the board name, or nothing on other hardware.
 is_lumi_gateway()
 {
-  grep -E '(dgnwg05lm|zhwg11lm)' /etc/board.json | tr -s '"' | cut -d\" -f4
+  grep -E '(dgnwg05lm|zhwg11lm)' /etc/board.json | tr -s '"' | cut -d\" -f4 || true
 }
 
 is_gtw360()
 {
-  grep 'gtw360' /etc/board.json | tr -s '"' | cut -d\" -f4
+  grep 'gtw360' /etc/board.json | tr -s '"' | cut -d\" -f4 || true
 }
 
 int_version() {
   echo "$@" | awk -F. '{ printf("%d%03d%03d%03d\n", $1,$2,$3,$4); }'
 }
 
+# A patch that changes nothing means its pattern no longer matches the Home Assistant
+# source, e.g. after a version bump. The install would still succeed, with the integration
+# broken (e.g. ZHA). So it aborts; HA_PATCH_CHECK=warn only lists such patches, which is
+# meant for porting to a new HA version.
+patch_failed()
+{
+  local f="${1:?patched file}"
+  local what="${2:?patch}"
+  if [ "${HA_PATCH_CHECK:-abort}" = warn ]; then
+    echo "WARNING: patch did not change $f: $what" >&2
+  else
+    echo "ERROR: patch did not apply to $f: $what" >&2
+    echo "       The Home Assistant source no longer matches this installer." >&2
+    exit "$EXIT_PATCH"
+  fi
+}
+
+# sed in place, one expression at a time; each one must change the file.
+# Usage: spatch [-E] file expression...
+spatch()
+{
+  local ere=""
+  if [ "$1" = -E ]; then ere=1; shift; fi
+  local f="${1:?file to patch}"; shift
+  local expr before
+  for expr in "$@"; do
+    before=$(md5sum < "$f")
+    if [ "$ere" ]; then
+      sed -i -E -e "$expr" "$f"
+    else
+      sed -i -e "$expr" "$f"
+    fi
+    [ "$(md5sum < "$f")" != "$before" ] || patch_failed "$f" "$expr"
+  done
+}
+
+# Replaces the exact (multi-line) text $2 with $3 in file $1; the text must be there.
+replace_text()
+{
+  local f="${1:?file to patch}"
+  python3 -c '
+import sys
+f, old, new = sys.argv[1:]
+with open(f) as fp: s = fp.read()
+if old not in s: sys.exit(1)
+with open(f, "w") as fp: fp.write(s.replace(old, new))
+' "$f" "${2:?text to replace}" "${3?replacement}" || patch_failed "$f" "replace: $(echo "$2" | sed -n 1p)"
+}
+
 mlpatch()
 {
   # Multi-line sed in place: temporarily replaces newlines with \x01 (ASCII SOH;
   # never appears in Python source files) so that multi-line patterns can be
-  # expressed as ordinary sed expressions.  Use \x01 in sed args wherever a
-  # newline should be matched or produced.
-  local f="$1"; shift
+  # expressed as ordinary sed expressions.  Use \x01 in sed patterns wherever a
+  # newline should be matched. Not in replacements: busybox sed writes a literal
+  # "x01" there; use replace_text for multi-line replacements.  The file must change, as with spatch.
+  local f="${1:?file to patch}"; shift
+  local before
+  before=$(md5sum < "$f")
   tr '\n' '\x01' < "$f" | sed "$@" | tr '\x01' '\n' > "${f}.new" && mv "${f}.new" "$f"
+  [ "$(md5sum < "$f")" != "$before" ] || patch_failed "$f" "$*"
 }
 
 check_free_space()
 {
-  local path="$1"
-  local min_kb="$2"
+  local path="${1:?directory to check}"
+  local min_kb="${2:?required free space in KiB}"
+  # Space this run frees on the same filesystem before it needs it (an old venv).
+  local reclaim_kb="${3:-0}"
   local free_kb
   mkdir -p "$path"
-  free_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
+  free_kb=$(df -kP "$path" | awk 'NR==2 {print $4}')
+  free_kb=$((free_kb + reclaim_kb))
   if [ "$free_kb" -lt "$min_kb" ]; then
     printf "ERROR: Not enough free space at %s: %d MB available, %d MB required.\n" \
       "$path" "$((free_kb / 1024))" "$((min_kb / 1024))" >&2
-    exit 1
+    exit "$EXIT_NO_SPACE"
   fi
 }
 
+mount_point_of()
+{
+  local path="${1:?existing path}"
+  df -kP "$path" | awk 'NR==2 {print $6}'
+}
+
+# A non-default directory must exist already. When the external disk it lives on is not
+# mounted, `mkdir -p` would otherwise silently put the installation on internal flash.
+require_existing_dir()
+{
+  local option="${1:?option name}"
+  local dir="${2:?directory}"
+  local default="${3:?default directory}"
+  if [ "$dir" != "$default" ] && [ ! -d "$dir" ]; then
+    echo "ERROR: $option directory $dir does not exist." >&2
+    echo "       If it is on an external disk, mount the disk. For a new installation, create it first: mkdir -p $dir" >&2
+    exit "$EXIT_NO_TARGET"
+  fi
+}
+
+# Path options end up in `rm -rf`, generated init scripts and YAML, so only
+# absolute paths of plain characters (no whitespace, quotes or `$`) are accepted.
+require_safe_path()
+{
+  local option="${1:?option name}"
+  local path="${2?path value}"
+  case "$path" in
+    /|*[!A-Za-z0-9._/+-]*|[!/]*|"")
+      echo "ERROR: $option must be an absolute path other than / using only A-Z a-z 0-9 . _ / + - (got: '$path')" >&2
+      exit "$EXIT_UNSAFE_PATH"
+      ;;
+  esac
+}
+
 set -eu
+# pipefail makes a failed download inside a pipeline stop the install. busybox ash (OpenWrt)
+# supports it; enable it only where available, because `set` aborts the shell otherwise.
+if (set -o pipefail) 2>/dev/null; then
+  set -o pipefail
+fi
 
 HOMEASSISTANT_MAJOR_VERSION="2026.2"
+# oom_score_adj for hass (-1000..1000); higher means killed first when memory runs out.
+HA_OOM_SCORE_ADJ=800
 export PIP_DEFAULT_TIMEOUT=100
 
 # May be set externally to skip numpy on broken platforms (e.g. soft-float MIPS).
 BROKEN_NUMPY="${BROKEN_NUMPY:-}"
 
+# Precedence for the options below: command-line option, environment variable, the
+# existing installation (venv, config, log file, configurator; see "Options not given"
+# further down), default. An empty value means "not given yet".
+
 # All temp files go here; exported as TMPDIR so pip and subprocesses use it too.
 # Default is flash-backed /root/tmp-ha; override via HA_TMP_DIR or --tmp-dir.
-STORAGE_TMP="${HA_TMP_DIR:-/root/tmp-ha}"
+DEFAULT_TMP=/root/tmp-ha
+STORAGE_TMP="${HA_TMP_DIR:-}"
 
 # Python venv for HA; override via HA_VENV_DIR or --venv-dir.
 # Point at an external mount to keep HA packages off the internal flash.
-VENV="${HA_VENV_DIR:-/opt/homeassistant}"
+DEFAULT_VENV=/opt/homeassistant
+VENV="${HA_VENV_DIR:-}"
 
 # HA config/data directory; override via HA_CONFIG_DIR or --config-dir.
-# The SQLite database grows over time — point at an external mount to keep
-# it off internal flash (e.g. /mnt/external/homeassistant).
-HA_CONFIG="${HA_CONFIG_DIR:-/etc/homeassistant}"
+# Holds .storage and backups, which grow over time; point at an external mount to keep
+# them off internal flash (e.g. /mnt/external/homeassistant).
+# The recorder database is not here; its location is set by --db-url.
+DEFAULT_CONFIG=/etc/homeassistant
+HA_CONFIG="${HA_CONFIG_DIR:-}"
 
 # HA log file path; override via HA_LOG_FILE or --log-file.
-HA_LOG_FILE="${HA_LOG_FILE:-/var/log/home-assistant.log}"
+DEFAULT_LOG_FILE=/var/log/home-assistant.log
+HA_LOG_FILE="${HA_LOG_FILE:-}"
 
 # recorder DB URL; override via HA_DB_URL or --db-url.
 # Default lives on tmpfs (/tmp) so flash isn't worn down by constant writes,
@@ -98,11 +217,13 @@ HA_DB_URL="${HA_DB_URL:-sqlite:////tmp/homeassistant.db}"
 # 3218; override via HA_INSTALL_CONFIGURATOR=1 or --with-configurator.
 # Disabled by default: it's extra install time/RAM and an unauthenticated
 # editor exposed on the network.
-HA_INSTALL_CONFIGURATOR="${HA_INSTALL_CONFIGURATOR:-}"
+# 1 = install, 0 = do not install (and remove an earlier one), empty = not given yet.
+HA_INSTALL_CONFIGURATOR="${HA_INSTALL_CONFIGURATOR:+1}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --tmp-dir)
+      [ $# -ge 2 ] || { echo "ERROR: --tmp-dir needs a value" >&2; exit "$EXIT_USAGE"; }
       STORAGE_TMP="$2"
       shift 2
       ;;
@@ -111,6 +232,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --venv-dir)
+      [ $# -ge 2 ] || { echo "ERROR: --venv-dir needs a value" >&2; exit "$EXIT_USAGE"; }
       VENV="$2"
       shift 2
       ;;
@@ -119,6 +241,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --config-dir)
+      [ $# -ge 2 ] || { echo "ERROR: --config-dir needs a value" >&2; exit "$EXIT_USAGE"; }
       HA_CONFIG="$2"
       shift 2
       ;;
@@ -127,6 +250,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --log-file)
+      [ $# -ge 2 ] || { echo "ERROR: --log-file needs a value" >&2; exit "$EXIT_USAGE"; }
       HA_LOG_FILE="$2"
       shift 2
       ;;
@@ -135,6 +259,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --db-url)
+      [ $# -ge 2 ] || { echo "ERROR: --db-url needs a value" >&2; exit "$EXIT_USAGE"; }
       HA_DB_URL="$2"
       shift 2
       ;;
@@ -147,22 +272,30 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --no-configurator)
-      HA_INSTALL_CONFIGURATOR=""
+      HA_INSTALL_CONFIGURATOR=0
       shift
       ;;
     --help|-h)
       echo "Usage: $0 [--tmp-dir <path>] [--venv-dir <path>] [--config-dir <path>] [--log-file <path>] [--db-url <url>] [--with-configurator|--no-configurator]"
       echo ""
       echo "Options:"
+      echo "  Non-default directories for --tmp-dir, --venv-dir and --config-dir, and the directory"
+      echo "  of a non-default --log-file, must already exist."
+      echo "  When --venv-dir, --config-dir, --log-file or the configurator choice are not given,"
+      echo "  they are taken from an existing installation (/etc/init.d/homeassistant), else the default."
+      echo ""
       echo "  --tmp-dir <path>    Temporary build directory (default: /root/tmp-ha)"
       echo "                      Can also be set via the HA_TMP_DIR environment variable."
       echo "                      Use a path on an external mount to avoid filling the primary disk."
+      echo "                      The script works in a new ha-install.* subdirectory and deletes only that."
       echo "  --venv-dir <path>   Python virtual environment directory (default: /opt/homeassistant)"
       echo "                      Can also be set via the HA_VENV_DIR environment variable."
       echo "                      Point at an external mount to keep HA packages off internal flash."
+      echo "                      An existing venv there is replaced on every run."
       echo "  --config-dir <path> HA configuration and data directory (default: /etc/homeassistant)"
       echo "                      Can also be set via the HA_CONFIG_DIR environment variable."
-      echo "                      Point at an external mount so the SQLite DB does not fill internal flash."
+      echo "                      Point at an external mount so .storage and backups do not fill internal flash."
+      echo "                      The recorder database is not stored here; see --db-url."
       echo "  --log-file <path>   HA log file path (default: /var/log/home-assistant.log)"
       echo "                      Can also be set via the HA_LOG_FILE environment variable."
       echo "  --db-url <url>      recorder DB URL (default: sqlite:////tmp/homeassistant.db)"
@@ -171,36 +304,115 @@ while [ $# -gt 0 ]; do
       echo "  --with-configurator Install HASS Configurator, a web-based file editor on port 3218 (default: disabled)"
       echo "                      Can also be enabled via the HA_INSTALL_CONFIGURATOR environment variable."
       echo "                      It has no authentication of its own; only enable it on a trusted network."
-      echo "  --no-configurator   Do not install HASS Configurator (default)."
+      echo "  --no-configurator   Do not install HASS Configurator, and remove one installed by an earlier run."
+      echo ""
+      echo "Exit codes:"
+      echo "  0   success"
+      echo "  $EXIT_USAGE  unknown option or missing option value"
+      echo "  $EXIT_HA_RUNNING  Home Assistant (or HASS Configurator) is still running"
+      echo "  $EXIT_NO_SPACE  not enough free disk space"
+      echo "  $EXIT_NO_VERSION  no Home Assistant $HOMEASSISTANT_MAJOR_VERSION release found"
+      echo "  $EXIT_UNSAFE_PATH  a path option is not an absolute path of safe characters"
+      echo "  $EXIT_NO_TARGET  a non-default directory does not exist (external disk not mounted?)"
+      echo "  $EXIT_PATCH  a patch of the Home Assistant source did not apply (installer does not match the HA release)"
+      echo "  other  a command failed; see the output above"
       exit 0
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      exit 1
+      exit "$EXIT_USAGE"
       ;;
   esac
 done
 
 if pgrep -a -f "bin/hass"; then
-  if [ "$HA_INSTALL_CONFIGURATOR" ]; then
-    echo "Stop running process of Home Assistant (and HASS Configurator) to free RAM for installation";
-  else
-    echo "Stop running process of Home Assistant to free RAM for installation";
-  fi
-  exit 1;
+  # Killing the process by hand does not work: procd restarts it (respawn).
+  {
+    echo "ERROR: Home Assistant or HASS Configurator is running. Stop it to free RAM for the installation:"
+    [ -x /etc/init.d/homeassistant ] && echo "  /etc/init.d/homeassistant stop"
+    [ -x /etc/init.d/hass-configurator ] && echo "  /etc/init.d/hass-configurator stop"
+    echo "Then wait until 'pgrep -f bin/hass' prints nothing, and run this script again."
+  } >&2
+  exit "$EXIT_HA_RUNNING"
 fi
 
-check_free_space "$STORAGE_TMP" 524288  # ~256 MB final + headroom for zip download
-rm -rf "$STORAGE_TMP"
-mkdir -p "$STORAGE_TMP"
+# Options not given are taken from an earlier installation, so that a re-run without them
+# updates that installation instead of installing a second one at the defaults.
+EXISTING_CMD=""
+if [ -f /etc/init.d/homeassistant ]; then
+  EXISTING_CMD=$(sed -n 's/^[[:space:]]*procd_set_param command //p' /etc/init.d/homeassistant)
+fi
+# Prints the value that follows option $1 in the existing hass command line.
+existing_arg()
+{
+  echo " $EXISTING_CMD " | sed -n "s/.* ${1:?option} \([^ ]*\) .*/\1/p"
+}
+# Only init scripts written by this installer run "<venv>/bin/hass" with an absolute path.
+EXISTING_VENV=$(echo " $EXISTING_CMD " | sed -n 's|.* \(/[^ ]*\)/bin/hass .*|\1|p')
+if [ -n "$EXISTING_VENV" ]; then
+  if [ -z "$VENV" ]; then
+    VENV="$EXISTING_VENV"
+    echo "Using --venv-dir $VENV of the existing installation"
+  fi
+  if [ -z "$HA_CONFIG" ]; then
+    HA_CONFIG=$(existing_arg --config)
+    [ -z "$HA_CONFIG" ] || echo "Using --config-dir $HA_CONFIG of the existing installation"
+  fi
+  if [ -z "$HA_LOG_FILE" ]; then
+    HA_LOG_FILE=$(existing_arg --log-file)
+    [ -z "$HA_LOG_FILE" ] || echo "Using --log-file $HA_LOG_FILE of the existing installation"
+  fi
+fi
+if [ -z "$HA_INSTALL_CONFIGURATOR" ] && [ -f /etc/init.d/hass-configurator ]; then
+  HA_INSTALL_CONFIGURATOR=1
+  echo "Keeping HASS Configurator of the existing installation (--no-configurator removes it)"
+fi
+[ "$HA_INSTALL_CONFIGURATOR" = 1 ] || HA_INSTALL_CONFIGURATOR=""
+STORAGE_TMP="${STORAGE_TMP:-$DEFAULT_TMP}"
+VENV="${VENV:-$DEFAULT_VENV}"
+HA_CONFIG="${HA_CONFIG:-$DEFAULT_CONFIG}"
+HA_LOG_FILE="${HA_LOG_FILE:-$DEFAULT_LOG_FILE}"
+
+require_safe_path --tmp-dir "$STORAGE_TMP"
+require_safe_path --venv-dir "$VENV"
+require_safe_path --config-dir "$HA_CONFIG"
+require_safe_path --log-file "$HA_LOG_FILE"
+require_existing_dir --tmp-dir "$STORAGE_TMP" "$DEFAULT_TMP"
+require_existing_dir --venv-dir "$VENV" "$DEFAULT_VENV"
+require_existing_dir --config-dir "$HA_CONFIG" "$DEFAULT_CONFIG"
+require_existing_dir --log-file "$(dirname "$HA_LOG_FILE")" "$(dirname "$DEFAULT_LOG_FILE")"
+
+# --tmp-dir names a parent directory that may hold other data (e.g. an external
+# disk's mount point). Work only in our own child directory and delete only that;
+# leftovers of earlier aborted runs carry the same name prefix.
+TMP_BASE="$STORAGE_TMP"
+mkdir -p "$TMP_BASE"
+rm -rf "$TMP_BASE"/ha-install.*
+
+# Free space needed (keep in sync with "Requirements" in README.md):
+# - temp dir: downloads and build trees during the install (upper bound);
+# - venv: measured ~300 MB for HA 2026.2 on x86_64, plus margin.
+# A re-run replaces the old venv (uv venv --clear), so its size counts as free.
+TMP_NEED_KB=524288
+VENV_NEED_KB=358400
+mkdir -p "$VENV"
+VENV_OLD_KB=$(du -sk "$VENV" | awk '{print $1}')
+if [ "$(mount_point_of "$TMP_BASE")" = "$(mount_point_of "$VENV")" ]; then
+  check_free_space "$TMP_BASE" $((TMP_NEED_KB + VENV_NEED_KB)) "$VENV_OLD_KB"
+else
+  check_free_space "$TMP_BASE" "$TMP_NEED_KB"
+  check_free_space "$VENV" "$VENV_NEED_KB" "$VENV_OLD_KB"
+fi
+STORAGE_TMP=$(mktemp -d "$TMP_BASE/ha-install.XXXXXX")
+trap 'rm -rf "$STORAGE_TMP"' EXIT
 export TMPDIR="$STORAGE_TMP"
 export UV_LINK_MODE=copy
 
 HOMEASSISTANT_VERSION=$(get_ha_version)
 
 if [ "$HOMEASSISTANT_VERSION" = "" ]; then
-  echo "Incorrect Home Assistant version. Exiting ...";
-  exit 1;
+  echo "ERROR: No Home Assistant $HOMEASSISTANT_MAJOR_VERSION release found on PyPI." >&2
+  exit "$EXIT_NO_VERSION"
 fi
 
 echo "=========================================="
@@ -214,8 +426,10 @@ wget -q "https://raw.githubusercontent.com/home-assistant/core/$HOMEASSISTANT_VE
 # fetch nabucasa deps from pyproject.toml (migrated from setup.py)
 # awk range: start after "dependencies = [", stop at a line whose first
 # non-whitespace character is "]" (handles both "  ]" and bare "]").
+# Under pipefail every consumer must read its whole input: an early exit
+# (awk exit, head, grep -q) kills the producer with SIGPIPE and fails the install.
 wget -q "https://raw.githubusercontent.com/NabuCasa/hass-nabucasa/$(get_version hass-nabucasa)/pyproject.toml" -O - \
-  | awk '/^dependencies = \[/{f=1;next} f && /^[[:space:]]*\]/{exit} f' \
+  | awk '/^dependencies = \[/ && !done {f=1;next} f && /^[[:space:]]*\]/{f=0;done=1;next} f' \
   | grep '[>=]=' \
   | sed -E 's/\s*"(.*)",?/\1/'
 ) > "$STORAGE_TMP/ha_requirements.txt"
@@ -310,13 +524,17 @@ apk fix 2>/dev/null || true
 cd "$STORAGE_TMP"
 
 rm -rf "$HA_CONFIG/deps/"
-find "$SITE_PACKAGES" | grep -E "/__pycache__$" | xargs rm -rf
+find "$SITE_PACKAGES" -type d -name __pycache__ -print0 | xargs -0 rm -rf
 rm -rf "$SITE_PACKAGES/botocore/data"
-find "$SITE_PACKAGES/numpy" -iname tests -print0 | xargs -0 rm -rf
+if [ -d "$SITE_PACKAGES/numpy" ]; then
+  find "$SITE_PACKAGES/numpy" -iname tests -print0 | xargs -0 rm -rf
+fi
 
 echo "Create Python venv at $VENV (inheriting apk packages)..."
-pip3 install --no-cache-dir uv
-uv venv --system-site-packages --seed "$VENV"
+# uv is pinned because its handling of an existing venv changed between versions.
+# --clear: a re-run (upgrade) always builds a clean venv; the config dir is not touched.
+pip3 install --no-cache-dir "uv==0.13.7"
+uv venv --clear --system-site-packages --seed "$VENV"
 VENV_SITE_PACKAGES="$VENV/lib/python$PYTHON_VERSION/site-packages"
 VENV_PIP="$VENV/bin/pip"
 
@@ -451,7 +669,7 @@ done < "$STORAGE_TMP/requirements.txt"
 
 if [ "$GTW360_GATEWAY" ]; then
   $VENV_PIP install --no-deps "zigpy-zboss==$ZIGPY_ZBOSS_VER"
-  sed -i -E 's/Requires-.*(jsonschema|coloredlogs)//g' $VENV_SITE_PACKAGES/zigpy_zboss-*-info/METADATA
+  sed -i -E 's/Requires-.*(jsonschema|coloredlogs)//g' "$VENV_SITE_PACKAGES"/zigpy_zboss-*-info/METADATA
 fi
 
 if [ "$NEED_ZHA" ]; then
@@ -473,8 +691,8 @@ done
 for f in "$SITE_PACKAGES"/boto3-*.egg-info/requires.txt; do
   [ -f "$f" ] && sed -i 's/botocore<1.13.0,>=1.12.135/botocore<1.13.0,>=1.12.0/' "$f"
 done
-rm -rf $VENV_SITE_PACKAGES/pycountry/locales \
-       $VENV_SITE_PACKAGES/pycountry/tests
+rm -rf "$VENV_SITE_PACKAGES/pycountry/locales" \
+       "$VENV_SITE_PACKAGES/pycountry/tests"
 
 echo "Install hass_nabucasa and ha-frontend..."
 # PyPI sdist, not the github.com archive: OpenWrt 25.12's wget (uclient-fetch) times out on github.com.
@@ -688,7 +906,7 @@ tar -ztf homeassistant.tar.gz | grep '/homeassistant/components/' | sed 's/^/t\/
 rx=$(sed -e 's/^/^/' -e 's/$/$/' "$STORAGE_TMP/ha_components.txt" | head -c -1 | tr '\n' '|')
 for d in "$TMPSTRUCT"/homeassistant-*/homeassistant/components/*/; do
   comp=$(basename "$d")
-  echo "$comp" | grep -q -E "$rx" || echo "*\/homeassistant\/components\/$comp"
+  echo "$comp" | grep -E "$rx" >/dev/null || echo "*\/homeassistant\/components\/$comp"
 done > "$STORAGE_TMP/ha_exclude.txt"
 rm -rf "$TMPSTRUCT" "$STORAGE_TMP/ha_components.txt"
 
@@ -704,16 +922,14 @@ sed -i "s/[>=]=.*//g" package_constraints.txt
 cd components
 
 # relax dependencies
-sed -i 's/sqlalchemy==[0-9\.]*/sqlalchemy/i' recorder/manifest.json
-sed -i 's/pillow==[0-9\.]*/pillow/i' image_upload/manifest.json
-sed -i 's/, UnidentifiedImageError//' image_upload/__init__.py
-sed -i 's/except UnidentifiedImageError/except OSError/' image_upload/__init__.py
-sed -i 's/zeroconf==[0-9\.]*/zeroconf/i' zeroconf/manifest.json
+spatch recorder/manifest.json 's/sqlalchemy==[0-9\.]*/sqlalchemy/i'
+spatch image_upload/manifest.json 's/pillow==[0-9\.]*/pillow/i'
+spatch image_upload/__init__.py 's/, UnidentifiedImageError//'
+spatch image_upload/__init__.py 's/except UnidentifiedImageError/except OSError/'
+spatch zeroconf/manifest.json 's/zeroconf==[0-9\.]*/zeroconf/i'
 #sed -i 's/netdisco==[0-9\.]*/netdisco/' discovery/manifest.json
-sed -i 's/PyNaCl==[0-9\.]*/PyNaCl/i' mobile_app/manifest.json
-sed -i 's/defusedxml==[0-9\.]*/defusedxml/i' ssdp/manifest.json
-sed -i 's/netdisco==[0-9\.]*/netdisco/i' ssdp/manifest.json
-sed -i 's/radios==[0-9\.]*/radios/i' radio_browser/manifest.json
+spatch mobile_app/manifest.json 's/PyNaCl==[0-9\.]*/PyNaCl/i'
+spatch radio_browser/manifest.json 's/radios==[0-9\.]*/radios/i'
 # Remove C-extension audio packages that have no musl wheels.
 # Use Python to edit manifest.json so the result is always valid JSON
 # (sed element-removal leaves orphan commas that break the parser).
@@ -727,65 +943,85 @@ m['requirements'] = [r for r in m.get('requirements', [])
 with open(f, 'w') as fp: json.dump(m, fp, indent=2)
 "
 # pymicro_vad and pyspeex_noise have no musl wheels; stub hard imports so the module loads
-sed -i 's/from pymicro_vad import MicroVad/MicroVad = None  # pymicro_vad unavailable on musl/' assist_pipeline/audio_enhancer.py
-sed -i 's/from pyspeex_noise import AudioProcessor/AudioProcessor = None  # pyspeex_noise unavailable on musl/' assist_pipeline/audio_enhancer.py
+spatch assist_pipeline/audio_enhancer.py 's/from pymicro_vad import MicroVad/MicroVad = None  # pymicro_vad unavailable on musl/'
+spatch assist_pipeline/audio_enhancer.py 's/from pyspeex_noise import AudioProcessor/AudioProcessor = None  # pyspeex_noise unavailable on musl/'
 
 # relax async-upnp-client versions
-sed -i 's/async-upnp-client==[0-9\.]*/async-upnp-client/i' yeelight/manifest.json
-sed -i 's/async-upnp-client==[0-9\.]*/async-upnp-client/i' upnp/manifest.json
-sed -i 's/async-upnp-client==[0-9\.]*/async-upnp-client/i' ssdp/manifest.json
+spatch yeelight/manifest.json 's/async-upnp-client==[0-9\.]*/async-upnp-client/i'
+spatch upnp/manifest.json 's/async-upnp-client==[0-9\.]*/async-upnp-client/i'
+spatch ssdp/manifest.json 's/async-upnp-client==[0-9\.]*/async-upnp-client/i'
 
 # remove bluetooth support from esphome
 mlpatch esphome/manifest.json \
   -E -e 's/, "bluetooth"//g' \
      -e 's/(, )?"bleak[-_]esphome"//' \
      -e 's/,\x01    "bleak-esphome==[0-9.]*"//g'
-sed -i -e 's/    config_entry.unique_id/    False/' -e 's/from homeassistant.components.bluetooth/#from homeassistant.components.bluetooth/' -e 's/async_scanner_by_source//' esphome/diagnostics.py
-sed -i 's/from homeassistant.components.bluetooth import async_remove_scanner/async_remove_scanner = lambda hass, mac: None/' esphome/__init__.py
-sed -i 's/from.*ESPHomeBluetoothDevice.*/ESPHomeBluetoothDevice = None/' esphome/entry_data.py
-sed -i -E 's/from.*async_connect_scanner.*/async def async_connect_scanner(*args, **kwargs): pass/' esphome/manager.py
+spatch esphome/diagnostics.py \
+  's/from homeassistant.components.bluetooth/#from homeassistant.components.bluetooth/' \
+  's/async_scanner_by_source//'
+spatch esphome/__init__.py 's/from homeassistant.components.bluetooth import async_remove_scanner/async_remove_scanner = lambda hass, mac: None/'
+spatch esphome/entry_data.py 's/from.*ESPHomeBluetoothDevice.*/ESPHomeBluetoothDevice = None/'
+spatch -E esphome/manager.py 's/from.*async_connect_scanner.*/async def async_connect_scanner(*args, **kwargs): pass/'
 
 # drop ffmpeg requirement from tts
-sed -i 's/, "ffmpeg"//' tts/manifest.json
-sed -i 's/ ffmpeg,//' tts/__init__.py
+spatch tts/manifest.json 's/, "ffmpeg"//'
+spatch tts/__init__.py 's/ ffmpeg,//'
 
 # drop matter requirement from google_assistant, it is a dependency for mobile_app
-sed -i -E 's/(\, *)?"matter"//' google_assistant/manifest.json
+spatch -E google_assistant/manifest.json 's/(\, *)?"matter"//'
 
 # drop av and numpy deps from stream (renamed from ha-av to av in 2026.2)
-sed -i -e 's/"av==[0-9\.]*", //' -e 's/, "numpy==[0-9\.]*"//' stream/manifest.json
+spatch stream/manifest.json \
+  's/"av==[0-9\.]*", //' \
+  's/, "numpy==[0-9\.]*"//'
 
 # soft float, like mips32 don't have numpy. Cut it off
 if ! [ -d "$SITE_PACKAGES/numpy" ]; then
-  sed -i \
-    -e 's/import numpy as np/np = None/' \
-    -e 's/np\.ndarray/Any/g' \
-    -e 's/TRANSFORM_IMAGE_FUNCTION[orientation]//' \
-    stream/core.py
+  spatch stream/core.py \
+    's/import numpy as np/np = None/' \
+    's/np\.ndarray/Any/g' \
+    's/TRANSFORM_IMAGE_FUNCTION[orientation]//'
 fi
 #sed -i -e 's/import av/#/' -e 's/av.logging/#/' stream/__init__.py
-sed -i 's/import av/av = None/' stream/__init__.py
-sed -i 's/import av/av = None/' stream/worker.py
-sed -i 's/import av/av = None/' stream/recorder.py
+spatch stream/__init__.py 's/import av/av = None/'
+spatch stream/worker.py 's/import av/av = None/'
+spatch stream/recorder.py 's/import av/av = None/'
 
 # fnv-hash-fast: cp313 musllinux wheels available on PyPI since 1.6.0; no workaround needed
 
 if [ "$NEED_ZHA" ]; then
   # relax version pins — all Zigbee backends now bundled as deps of the zha PyPI package
-  sed -i 's/"zha==[0-9\.]*"/"zha"/i' zha/manifest.json
-  sed -i 's/"serialx==[0-9\.]*"/"serialx"/i' zha/manifest.json
+  spatch zha/manifest.json 's/"zha==[0-9\.]*"/"zha"/i'
+  spatch zha/manifest.json 's/"serialx==[0-9\.]*"/"serialx"/i'
+
+  # Multi-line stubs use replace_text, not mlpatch: busybox sed writes "\x01" in a
+  # replacement as a literal "x01", which produced invalid Python here.
 
   # stub homeassistant_hardware helpers in __init__.py (not installed on OpenWrt)
-  mlpatch zha/__init__.py \
-    -E 's/from homeassistant\.components\.homeassistant_hardware\.helpers import \(\x01    async_is_firmware_update_in_progress,\x01    async_notify_firmware_info,\x01    async_register_firmware_info_provider,\x01\)/async_is_firmware_update_in_progress = lambda *a, **kw: False\x01async_notify_firmware_info = lambda *a, **kw: None\x01async_register_firmware_info_provider = lambda *a, **kw: None/'
+  replace_text zha/__init__.py \
+'from homeassistant.components.homeassistant_hardware.helpers import (
+    async_is_firmware_update_in_progress,
+    async_notify_firmware_info,
+    async_register_firmware_info_provider,
+)' \
+'async_is_firmware_update_in_progress = lambda *a, **kw: False
+async_notify_firmware_info = lambda *a, **kw: None
+async_register_firmware_info_provider = lambda *a, **kw: None'
 
   # stub ZigbeeFlowStrategy (from homeassistant_hardware, not installed on OpenWrt)
   # needed in both config_flow.py and radio_manager.py
   for f in zha/config_flow.py zha/radio_manager.py; do
-    mlpatch "$f" \
-      -E 's/from homeassistant\.components\.homeassistant_hardware\.firmware_config_flow import \(\x01    ZigbeeFlowStrategy,\x01\)/class ZigbeeFlowStrategy(str):\x01    RECOMMENDED = "recommended"\x01    ADVANCED = "advanced"/'
+    replace_text "$f" \
+'from homeassistant.components.homeassistant_hardware.firmware_config_flow import (
+    ZigbeeFlowStrategy,
+)' \
+'class ZigbeeFlowStrategy(str):
+    RECOMMENDED = "recommended"
+    ADVANCED = "advanced"'
   done
-  sed -i -e 's/from homeassistant.components.homeassistant_hardware import silabs_multiprotocol_addon/silabs_multiprotocol_addon = None  #/' -e 's/from homeassistant.components.homeassistant_yellow import hardware as yellow_hardware/yellow_hardware = None  #/' zha/config_flow.py
+  spatch zha/config_flow.py \
+    's/from homeassistant.components.homeassistant_hardware import silabs_multiprotocol_addon/silabs_multiprotocol_addon = None  #/' \
+    's/from homeassistant.components.homeassistant_yellow import hardware as yellow_hardware/yellow_hardware = None  #/'
 
   # stub local zha/homeassistant_hardware.py (imports from global homeassistant_hardware)
   # cp zha/homeassistant_hardware.py zha/__homeassistant_hardware.py
@@ -804,36 +1040,43 @@ fi
 # Lumi Gateway (zigate): zigpy-zigate is now a direct dep of zha==0.0.90 — no manifest patch needed
 # GTW360 Gateway (zboss): zigpy-zboss is NOT in zha deps; zboss pip install is handled above
 
-sed -i 's/"cloud",//' default_config/manifest.json
-sed -i 's/"dhcp",//' default_config/manifest.json
-sed -i 's/"mobile_app",//' default_config/manifest.json
-sed -i 's/"updater",//' default_config/manifest.json
-sed -i 's/"usb",//' default_config/manifest.json
-sed -i 's/"bluetooth",//' default_config/manifest.json
-sed -i 's/"assist_pipeline",//' default_config/manifest.json
-sed -i 's/"stream",//' default_config/manifest.json
-sed -i 's/==[0-9\.]*//g' frontend/manifest.json
+# Trim default_config with JSON: removing '"x",' with sed misses the last list element.
+# Prints each dependency to drop that the manifest does not have (any more).
+DEFAULT_CONFIG_MISSING=$(python3 -c "
+import json, sys
+f = 'default_config/manifest.json'
+drop = sys.argv[1:]
+with open(f) as fp: m = json.load(fp)
+deps = m.get('dependencies', [])
+print('\\n'.join(d for d in drop if d not in deps))
+m['dependencies'] = [d for d in deps if d not in drop]
+with open(f, 'w') as fp: json.dump(m, fp, indent=2)
+" cloud dhcp mobile_app usb bluetooth assist_pipeline stream)
+for dep in $DEFAULT_CONFIG_MISSING; do
+  patch_failed default_config/manifest.json "remove dependency $dep"
+done
+spatch frontend/manifest.json 's/==[0-9\.]*//g'
 
 cd ../..
 # integrations and helper sections leave as is, only nested items
-sed -i 's/        "/        # "/' homeassistant/generated/config_flows.py
-sed -i 's/    # "mqtt"/    "mqtt"/' homeassistant/generated/config_flows.py
-sed -i 's/    # "esphome"/    "esphome"/' homeassistant/generated/config_flows.py
-sed -i 's/    # "met"/    "met"/' homeassistant/generated/config_flows.py
-sed -i 's/    # "radio_browser"/    "radio_browser"/' homeassistant/generated/config_flows.py
+spatch homeassistant/generated/config_flows.py 's/        "/        # "/'
+spatch homeassistant/generated/config_flows.py 's/    # "mqtt"/    "mqtt"/'
+spatch homeassistant/generated/config_flows.py 's/    # "esphome"/    "esphome"/'
+spatch homeassistant/generated/config_flows.py 's/    # "met"/    "met"/'
+spatch homeassistant/generated/config_flows.py 's/    # "radio_browser"/    "radio_browser"/'
 if [ "$NEED_ZHA" ]; then
-  sed -i 's/    # "zha"/    "zha"/' homeassistant/generated/config_flows.py
+  spatch homeassistant/generated/config_flows.py 's/    # "zha"/    "zha"/'
 fi
 
 # disabling all zeroconf services
-sed -i 's/^    "_/    "_disabled_/' homeassistant/generated/zeroconf.py
+spatch homeassistant/generated/zeroconf.py 's/^    "_/    "_disabled_/'
 # re-enable required ones
-sed -i 's/_disabled_esphomelib./_esphomelib./' homeassistant/generated/zeroconf.py
-sed -i 's/_disabled_miio./_miio./' homeassistant/generated/zeroconf.py
+spatch homeassistant/generated/zeroconf.py 's/_disabled_esphomelib./_esphomelib./'
+spatch homeassistant/generated/zeroconf.py 's/_disabled_miio./_miio./'
 
 # disabling all supported_brands
 if [ -f homeassistant/generated/supported_brands.py ]; then  # 2022.8
-  sed -i 's/^    /    # /' homeassistant/generated/supported_brands.py
+  spatch homeassistant/generated/supported_brands.py 's/^    /    # /'
 else
   mkdir -p homeassistant/brands-disabled/
   mv homeassistant/brands/* homeassistant/brands-disabled/
@@ -841,40 +1084,34 @@ fi
 
 # backport orjson to classic json
 # helpers/json.py
-sed -i \
-  -e 's/orjson/json/' \
-  -e 's/\.decode(.*)//' \
-  -e 's/option=.*,/\n/' \
-  -e 's/.as_posix/.as_posix()\n    if isinstance(obj, (datetime.date, datetime.time)):\n        return obj.isoformat/' \
-  -e 's/json_bytes /json_bytes_old /' \
-  -e 's/return json_bytes(data)/return _json_default_encoder(data)/' \
-  -e 's/json_fragment = .*/json_fragment = json.loads/' \
-  -e 's/mode = "wb"/mode = "w"/' \
-  homeassistant/helpers/json.py
+spatch homeassistant/helpers/json.py \
+  's/orjson/json/' \
+  's/\.decode(.*)//' \
+  's/option=.*,/\n/' \
+  's/.as_posix/.as_posix()\n    if isinstance(obj, (datetime.date, datetime.time)):\n        return obj.isoformat/' \
+  's/json_bytes /json_bytes_old /' \
+  's/return json_bytes(data)/return _json_default_encoder(data)/' \
+  's/json_fragment = .*/json_fragment = json.loads/' \
+  's/mode = "wb"/mode = "w"/'
 echo 'def json_bytes(data): return json.dumps(data, default=json_encoder_default).encode("utf-8")' \
   >> homeassistant/helpers/json.py
 # util/json.py
-sed -i -e 's/orjson/json/' -e 's/\.decode(.*)//' -e 's/option=.*/\n/' homeassistant/util/json.py
+spatch homeassistant/util/json.py 's/orjson/json/'
 # helpers/template/__init__.py (was helpers/template.py before 2026.2)
 # aiohttp_client.py no longer uses orjson in 2026.2 — patch removed
-sed -i -E \
-  -e 's/orjson/json/g' \
-  -e 's/\.decode(.*)//' \
-  -e 's/(b64(de|en)code.*?)/\1.decode("utf-8")/' \
-  -e 's/option=option/#option=option/' \
-  -e 's/json.OPT_[A-Z_0-9]*/0/g' \
-  homeassistant/helpers/template/__init__.py
+spatch -E homeassistant/helpers/template/__init__.py \
+  's/orjson/json/g' \
+  's/\.decode(.*)//' \
+  's/option=option/#option=option/' \
+  's/json.OPT_[A-Z_0-9]*/0/g'
 # aiohttp_zlib_ng: replaced by aiohttp_fast_zlib (pure Python) in 2026.2 — patches removed
 # handler_cancellation: supported in aiohttp >= 3.9; we use 3.13.3 — patch removed
 
 # Patch installation type
-sed -i 's/"installation_type": "Unknown"/"installation_type": "Home Assistant on OpenWrt"/' homeassistant/helpers/system_info.py
+spatch homeassistant/helpers/system_info.py 's/"installation_type": "Unknown"/"installation_type": "Home Assistant on OpenWrt"/'
 find . -type f -exec touch {} +
-# Relax version specifiers to ">=MAJOR" so pip can satisfy them with the
-# packages already installed by apk: e.g. aiohttp>=3.9.0 → aiohttp>=3.
-sed -i -E 's/(==|>=|~=)([0-9]+)\.[0-9][0-9.a-z]*/>=\2/g' setup.cfg
 
-rm -rf $VENV_SITE_PACKAGES/homeassistant*
+rm -rf "$VENV_SITE_PACKAGES"/homeassistant*
 
 if [ ! -f setup.py ]; then
   awk \
@@ -894,9 +1131,9 @@ $VENV_PIP install . --no-cache-dir -c "$STORAGE_TMP/owrt_constraints.txt"
 cd ../
 rm -rf "homeassistant-$HOMEASSISTANT_VERSION/" "$HA_BUILD" "$STORAGE_TMP"
 
-IP=$(ip a | grep "inet .*br-lan" | cut -d " " -f6 | tail -1 | cut -d / -f1)
+IP=$(ip a | grep "inet .*br-lan" | cut -d " " -f6 | tail -1 | cut -d / -f1 || true)
 if [ -z "$IP" ]; then
-  IP=$(ip a | grep "inet " | cut -d " " -f6 | tail -1 | cut -d / -f1)
+  IP=$(ip a | grep "inet " | cut -d " " -f6 | tail -1 | cut -d / -f1 || true)
 fi
 
 if [ ! -f "$HA_CONFIG/configuration.yaml" ]; then
@@ -909,7 +1146,6 @@ default_config:
 # Text to speech
 tts:
   - platform: google_translate
-    language: ru
 
 recorder:
   purge_keep_days: 1
@@ -961,6 +1197,10 @@ EOF
   touch "$HA_CONFIG/automations.yaml"
   touch "$HA_CONFIG/scripts.yaml"
   touch "$HA_CONFIG/scenes.yaml"
+else
+  echo "NOTE: $HA_CONFIG/configuration.yaml exists and is left unchanged."
+  echo "      --db-url and the Configurator panel only take effect in a new configuration;"
+  echo "      edit configuration.yaml to change them."
 fi
 
 echo "Create starting script in init.d"
@@ -976,7 +1216,9 @@ start_service()
     # Return 0 so the boot sequence continues without error.
     [ -x $VENV/bin/hass ] || { logger -t homeassistant "$VENV/bin/hass not found — external disk not mounted?"; return 0; }
     procd_open_instance
-    procd_set_param command $VENV/bin/hass --config $HA_CONFIG --log-file $HA_LOG_FILE --log-rotate-days 3
+    # The wrapper makes HA the kernel's first choice when memory runs out, so that an OOM kill
+    # hits HA (restarted by respawn) and not dnsmasq or hostapd. procd has no parameter for it.
+    procd_set_param command /bin/sh -c 'echo $HA_OOM_SCORE_ADJ > /proc/self/oom_score_adj; exec "\$0" "\$@"' $VENV/bin/hass --config $HA_CONFIG --log-file $HA_LOG_FILE --log-rotate-days 3
     # Restart after crashes and OOM kills; the 30 s delay lets memory settle.
     # Give up after 5 runs shorter than 1 h to stop a crash loop.
     procd_set_param respawn 3600 30 5
@@ -1008,6 +1250,11 @@ start_service()
 EOF
   chmod +x /etc/init.d/hass-configurator
   /etc/init.d/hass-configurator enable
+elif [ -f /etc/init.d/hass-configurator ]; then
+  # An earlier run installed it; without the option it must not keep starting at boot.
+  echo "Remove HASS Configurator init script from an earlier installation"
+  /etc/init.d/hass-configurator disable || true
+  rm -f /etc/init.d/hass-configurator
 fi
 
 echo "Done."

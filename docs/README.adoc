@@ -1,0 +1,11 @@
+= Documentation
+
+Entry point to the documentation of this project.
+
+User and operator documentation::
+link:../README.md[README.md] -- requirements, installation (including external storage),
+supported features and integrations, ZHA on the Xiaomi gateway, adding components.
+
+Developer documentation::
+link:../tests/README.adoc[tests/README.adoc] -- operational-qualification tests of
+`ha_install.sh` in x86_64 and aarch64 OpenWrt QEMU VMs.

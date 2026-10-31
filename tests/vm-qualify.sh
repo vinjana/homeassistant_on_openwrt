@@ -55,7 +55,7 @@ echo ""
 
 if ! check_ssh; then
     echo "ERROR: VM not reachable. Run ./vm-start.sh $ARCH first." >&2
-    exit 1
+    exit "$EXIT_VM"
 fi
 
 echo "--- Venv ---"
@@ -108,6 +108,13 @@ if [[ $HA_UP -eq 0 ]]; then
     FAIL=$(( FAIL + 1 ))
 fi
 
+# The init script raises hass's oom_score_adj so that an OOM kill hits HA first.
+# "[b]in/hass --config" matches hass itself, not hass-configurator or this remote shell.
+# shellcheck disable=SC2016  # expanded by the VM's shell
+check_output "hass oom_score_adj is 800" \
+    'for p in $(pgrep -f "[b]in/hass --config"); do cat /proc/$p/oom_score_adj; done' \
+    '^800$'
+
 if ssh_run "test -e /etc/init.d/hass-configurator" >/dev/null 2>&1; then
     check "hass-configurator starts"  "/etc/init.d/hass-configurator start"
 
@@ -136,9 +143,31 @@ else
 fi
 
 echo ""
+echo "--- Home Assistant log ---"
+# A listening port does not mean the integrations loaded: setup errors only show in the log.
+# The log path comes from the installed init script (--log-file may have changed it).
+# HA keeps setting up integrations after it binds the port; give it time first.
+sleep 30
+# shellcheck disable=SC2016  # expanded by the VM's shell
+HA_LOG_CMD='sed -n "s/.*--log-file \([^ ]*\).*/\1/p" /etc/init.d/homeassistant'
+HA_LOG_ERR_RX='Setup failed for|Error setting up|Unable to prepare setup|Unable to install package|ImportError|ModuleNotFoundError'
+check "HA log file exists" "test -s \"\$($HA_LOG_CMD)\""
+printf "  %-55s" "no setup or import errors in HA log"
+if LOG_ERRORS=$(ssh_run "grep -E '$HA_LOG_ERR_RX' \"\$($HA_LOG_CMD)\"" 2>/dev/null); then
+    echo "FAIL"
+    echo "$LOG_ERRORS" | head -20 | sed 's/^/      /'
+    FAIL=$(( FAIL + 1 ))
+else
+    echo "PASS"
+    PASS=$(( PASS + 1 ))
+fi
+
+echo ""
 echo "--- Reboot persistence ---"
 check "hass init script enabled" "/etc/init.d/homeassistant enabled"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
-[[ $FAIL -eq 0 ]]
+if (( FAIL > 0 )); then
+    exit "$EXIT_CHECKS_FAILED"
+fi

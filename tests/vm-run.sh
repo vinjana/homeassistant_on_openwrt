@@ -34,12 +34,12 @@ init_ssh
 
 if [[ ! -f "$INSTALL_SCRIPT" ]]; then
     echo "Install script not found: $INSTALL_SCRIPT" >&2
-    exit 1
+    exit "$EXIT_PREREQ"
 fi
 
 if ! check_ssh; then
     echo "VM ($ARCH) is not reachable. Run ./vm-start.sh $ARCH first." >&2
-    exit 1
+    exit "$EXIT_VM"
 fi
 
 wait_for_internet
