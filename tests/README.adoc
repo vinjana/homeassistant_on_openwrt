@@ -13,7 +13,7 @@ and that Home Assistant starts and answers on port 8123.
 
 `vm-test.sh` is the primary entry point for end-to-end test runs.
 
-The individual `vm-*.sh` scripts remain available for single-step use.
+The individual `+vm-*.sh+` scripts remain available for single-step use.
 
 All scripts share a common library, `vm-lib.sh`, which provides arch configuration
 (`arch_config`), SSH helpers (`init_ssh`, `ssh_run`, `wait_for_ssh`), PID file
@@ -69,7 +69,7 @@ This script requires no `sudo`. All operations work on regular files in userspac
 . Extracts the partition to a temp file, expands the ext4 filesystem with `resize2fs`, and writes it back with `dd` (no loop device or root needed).
 . Injects a `uci-defaults` script via `debugfs` that configures a second NIC (eth1) for DHCP
   so that QEMU's user-mode networking can reach the VM via the SSH port-forward.
-. Saves a pristine snapshot (`*.pristine.img`) of the fully-configured base image.
+. Saves a pristine snapshot (`+*.pristine.img+`) of the fully-configured base image.
   Subsequent test runs restore from this snapshot instead of re-downloading.
 
 The script is idempotent — safe to re-run.
@@ -155,8 +155,10 @@ rm tests/openwrt-25.12.3-x86-64-generic-ext4-combined.pristine.img
 
 Checks performed:
 
-* Native library imports: `ciso8601`, `cryptography`, `PIL`, `bcrypt`, `aiohttp`, `uv`, `yaml`, `sqlalchemy`, `zeroconf`
+* Native library imports: `ciso8601`, `cryptography`, `PIL`, `bcrypt`, `aiohttp`, `uv`, `yaml`, `sqlalchemy`, `zeroconf`, `lru`
 * Home Assistant package import and version string
+* Both template state caches are a size-limited `lru.LRU` (a plain `dict` there leaks memory)
+* No `LRU = lambda` replacement anywhere in the installed `homeassistant` package
 * HA service starts via `/etc/init.d/homeassistant start`
 * Port 8123 responds with a valid API response (up to 30 s wait)
 * hass-configurator answers on port 3218

@@ -81,6 +81,9 @@ check_output "HA version"    "$VENV_PYTHON -c 'from homeassistant.const import _
 # A plain dict here would never evict, so every State a template reads would stay in memory.
 check "template state cache is a bounded lru.LRU" \
     "$VENV_PYTHON -c 'import lru, homeassistant.helpers.template as t; assert all(isinstance(c, lru.LRU) and c.get_size() > 0 for c in (t.CACHED_TEMPLATE_LRU, t.CACHED_TEMPLATE_NO_COLLECT_LRU))'"
+# The recorder and http caches used the same unbounded replacement; catch it anywhere in HA.
+check "no LRU-to-dict replacement in installed HA" \
+    "d=\$(echo $VENV_DIR/lib/python*/site-packages/homeassistant); test -d \"\$d\" && ! grep -rq 'LRU = lambda' \"\$d\""
 
 echo ""
 echo "--- Home Assistant startup ---"

@@ -39,6 +39,24 @@ In this case restarting HA could work.
 Other components are not tested and may require additional changed in 
 requirement versions or Python libraries.
 
+## Upgrading an existing installation
+
+Re-run the install script to get fixes from this repository (see [Changelog](#changelog)).
+Your configuration is kept: the script generates `configuration.yaml` only if it does not exist yet.
+
+1. Stop Home Assistant. The script refuses to run while it is running:
+   ```sh
+   /etc/init.d/homeassistant stop
+   ```
+2. Re-run the script with the **same options** as the first installation
+   (`--venv-dir`, `--config-dir`, `--db-url`, `--with-configurator`, or the corresponding environment variables).
+   With different or missing options, the script installs a second venv at the default location
+   and rewrites `/etc/init.d/homeassistant` to use it.
+3. Start Home Assistant again:
+   ```sh
+   /etc/init.d/homeassistant start
+   ```
+
 ## Installing on external storage
 
 Home Assistant requires roughly 250 MB of storage for its Python packages, plus a growing
@@ -259,3 +277,18 @@ versions at all.
 
 The code has been tested with OpenWRT VMs on x86_64 and aarch64 architectures.
 Reproducible tests are described in [tests/README.adoc](tests/README.adoc).
+
+## Changelog
+
+Versioning: each branch is named after the OpenWrt release it supports (e.g. `25.12`) and installs
+one Home Assistant major version (`HOMEASSISTANT_MAJOR_VERSION` in `ha_install.sh`).
+There are no release tags; entries below are dated and apply to the branch they are on.
+
+### 2026-11-11
+
+- Fixed: Home Assistant memory grew steadily (about 15 MiB/h) until the kernel killed it.
+  The installer replaced Home Assistant's size-limited caches with unlimited ones; it now installs
+  OpenWrt's `python3-lru-dict` package instead.
+  Installations made before this fix keep leaking: [upgrade](#upgrading-an-existing-installation) them by re-running the script.
+- Fixed: installation stopped with a timeout while downloading hass-nabucasa on OpenWrt 25.12.
+  It is now downloaded from PyPI instead of github.com.
