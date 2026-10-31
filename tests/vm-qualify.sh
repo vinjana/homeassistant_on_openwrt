@@ -72,11 +72,15 @@ check "uv"                   "$VENV_PYTHON -c 'import uv'"
 check "yaml"                 "$VENV_PYTHON -c 'import yaml'"
 check "sqlalchemy"           "$VENV_PYTHON -c 'import sqlalchemy'"
 check "zeroconf"             "$VENV_PYTHON -c 'import zeroconf'"
+check "lru (lru-dict)"       "$VENV_PYTHON -c 'import lru'"
 
 echo ""
 echo "--- Home Assistant package import ---"
 check "homeassistant imports" "$VENV_PYTHON -c 'import homeassistant'"
 check_output "HA version"    "$VENV_PYTHON -c 'from homeassistant.const import __version__; print(__version__)'" "20"
+# A plain dict here would never evict, so every State a template reads would stay in memory.
+check "template state cache is a bounded lru.LRU" \
+    "$VENV_PYTHON -c 'import lru, homeassistant.helpers.template as t; assert all(isinstance(c, lru.LRU) and c.get_size() > 0 for c in (t.CACHED_TEMPLATE_LRU, t.CACHED_TEMPLATE_NO_COLLECT_LRU))'"
 
 echo ""
 echo "--- Home Assistant startup ---"

@@ -268,6 +268,7 @@ apk add \
   python3-jmespath \
   python3-light \
   python3-logging \
+  python3-lru-dict \
   python3-lzma \
   python3-markupsafe \
   python3-multiprocessing \
@@ -476,16 +477,17 @@ rm -rf $VENV_SITE_PACKAGES/pycountry/locales \
        $VENV_SITE_PACKAGES/pycountry/tests
 
 echo "Install hass_nabucasa and ha-frontend..."
-wget "https://github.com/NabuCasa/hass-nabucasa/archive/$NABUCASA_VER.tar.gz" -O - > "hass-nabucasa-$NABUCASA_VER.tar.gz"
-tar -zxf "hass-nabucasa-$NABUCASA_VER.tar.gz"
-cd "hass-nabucasa-$NABUCASA_VER"
+# PyPI sdist, not the github.com archive: OpenWrt 25.12's wget (uclient-fetch) times out on github.com.
+wget "https://files.pythonhosted.org/packages/source/h/hass_nabucasa/hass_nabucasa-$NABUCASA_VER.tar.gz" -O "hass_nabucasa-$NABUCASA_VER.tar.gz"
+tar -zxf "hass_nabucasa-$NABUCASA_VER.tar.gz"
+cd "hass_nabucasa-$NABUCASA_VER"
 # strip version pins from whichever build file nabucasa uses
 [ -f setup.py ] && sed -i 's/[<=>]=.*"/"/' setup.py
 [ -f pyproject.toml ] && sed -i 's/[<=>]=.*"/"/' pyproject.toml
 rm -rf "$VENV_SITE_PACKAGES"/hass_nabucasa-*.egg
 $VENV_PIP install . --no-cache-dir -c "$STORAGE_TMP/owrt_constraints.txt"
 cd ..
-rm -rf "hass-nabucasa-$NABUCASA_VER.tar.gz" "hass-nabucasa-$NABUCASA_VER"
+rm -rf "hass_nabucasa-$NABUCASA_VER.tar.gz" "hass_nabucasa-$NABUCASA_VER"
 
 # cleanup
 find "$VENV_SITE_PACKAGES" -iname tests -print0 | xargs -0 rm -rf
@@ -699,19 +701,7 @@ cd "homeassistant-$HOMEASSISTANT_VERSION/homeassistant/"
 echo '' > requirements.txt
 sed -i "s/[>=]=.*//g" package_constraints.txt
 
-# replace LRU with simple dict (helpers/template/ is a package in 2026.2)
-sed -i -e 's/from lru import LRU/LRU = lambda x: dict()/' -e 's/lru.get_size()/128/' -e 's/lru.set_size/pass  # \0/' helpers/template/__init__.py
-
 cd components
-
-# replace LRU with simple dict
-# recorder/core.py and recorder/db_schema.py no longer use lru-dict in 2026.2
-# recorder manifest no longer lists lru-dict
-sed -i 's/from lru import LRU/LRU = lambda x: dict()/' recorder/table_managers/event_types.py
-sed -i -e 's/from lru import LRU/LRU = lambda x: dict()/' -e 's/lru.get_size()/128/' -e 's/lru.set_size/pass  # \0/' recorder/table_managers/__init__.py
-sed -i -e 's/from lru import LRU/LRU = lambda x: dict()/' -e 's/lru.get_size()/128/' -e 's/lru.set_size/pass  # \0/' recorder/table_managers/statistics_meta.py
-sed -i 's/from lru import LRU/LRU = lambda x: dict()/' http/static.py
-# esphome/entry_data.py no longer uses lru-dict in 2026.2
 
 # relax dependencies
 sed -i 's/sqlalchemy==[0-9\.]*/sqlalchemy/i' recorder/manifest.json
